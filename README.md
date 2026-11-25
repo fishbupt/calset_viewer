@@ -28,6 +28,8 @@ python parse_pna_cal.py calset_101pts.cal --export-dir ./cal_out
 
 解析器按已识别的 MFC CArchive 布局读取文件头、激励与校准设置、元数据、标准件测量和误差项。仪器型号、固件版本和 CalSet 类型的兼容性取决于文件布局。
 
+格式布局、样本字段和解析覆盖范围见 [PNA / PNA-X `.cal` 二进制数据结构](docs/pna-cal-file-format.md)。
+
 ## 查看与导出
 
 1. 点击 **打开 .cal**、将文件拖入窗口，或在启动命令末尾追加文件路径。
