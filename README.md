@@ -15,15 +15,18 @@ uv run --locked python calset_viewer_gui.py
 
 项目通过 `pyproject.toml` 声明 PyQt6 和 Matplotlib 依赖，并通过 `uv.lock` 锁定依赖版本。
 
-## 接入 `.cal` 解析模块
+## 命令行解析与导出
 
-共享源码包含查看器界面。读取真实 `.cal` 文件需要另行提供兼容的 `parse_pna_cal.py`，放在 `calset_viewer_gui.py` 同目录。查看器使用以下接口：
+`parse_pna_cal.py` 已随项目提供，仅使用 Python 标准库。在仓库目录可直接执行：
 
-- `parse_cal_file(raw)` 接收 `.cal` 文件的字节，返回 `ParsedCalFile`，其中包含文件头、校准配置、元数据、标准件测量及误差项等数据。
-- `ComplexTrace` 描述标准件测量等复数迹线。
-- `export_results(parsed, output_dir)` 将完整结果写入指定目录。
+```sh
+python parse_pna_cal.py calset_101pts.cal
+python parse_pna_cal.py calset_101pts.cal --export-dir ./cal_out
+```
 
-缺少解析模块时窗口仍可启动，打开 `.cal` 时会显示安装位置提示。可读取的仪器型号、固件版本和 CalSet 类型取决于解析器支持的格式。
+第一条命令打印校准文件摘要。第二条命令还会写出 `summary.json`，并按文件中解析到的数据生成 `raw_measurements.csv`、`mapped_measurements.csv` 和 `error_terms.csv`。
+
+解析器按已识别的 MFC CArchive 布局读取文件头、激励与校准设置、元数据、标准件测量和误差项。仪器型号、固件版本和 CalSet 类型的兼容性取决于文件布局。
 
 ## 查看与导出
 
