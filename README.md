@@ -30,6 +30,8 @@ python parse_pna_cal.py calset_101pts.cal --export-dir ./cal_out
 
 格式布局、样本字段和解析覆盖范围见 [PNA / PNA-X `.cal` 二进制数据结构](docs/pna-cal-file-format.md)。
 
+CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [Keysight VNA CalSet 内容及用途说明](docs/pna-calset-content-and-purpose.md)。
+
 ## 查看与导出
 
 1. 点击 **打开 .cal**、将文件拖入窗口，或在启动命令末尾追加文件路径。
