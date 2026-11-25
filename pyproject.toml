@@ -1,0 +1,10 @@
+[project]
+name = "calset-viewer"
+version = "0.1.0"
+description = "Desktop viewer for Keysight PNA and PNA-X calibration files"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.8,<4",
+    "PyQt6>=6.6,<7",
+]
