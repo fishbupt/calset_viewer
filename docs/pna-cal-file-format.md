@@ -200,6 +200,7 @@ struct SRFIPropertyNode {
 
 ~~~c
 struct PortCalKitEntry {
+    uint32_t entry_prefix;        // 0
     uint32_t port_index;          // 1、2、3、4
     CStringW connector_type;      // "1.85 mm male"
     CStringW calkit_name;         // "SimECal4 User 2 ECal SN00000000"
@@ -214,7 +215,9 @@ struct CalSettingsHeader {
     uint32_t        unk_1;        // 1
     uint32_t        unk_0;        // 0
     CStringW        timestamp_utc;// "2026-11-25 07:26:59"
-    uint32_t        port_count;   // 4
+    uint32_t        unk_table_1;   // 1
+    uint32_t        unk_table_0;   // 0
+    uint32_t        port_count;    // 4
     PortCalKitEntry port_kits[port_count];
 };
 ~~~
@@ -274,6 +277,7 @@ struct ErrorTermSet {
     uint32_t       num_ports;       // 4
     uint32_t       port_ids[num_ports];        // 1、2、3、4
     uint32_t       num_z0;          // 4
+    uint32_t       unk_z0_prefix;   // 1
     ComplexFloat64 port_z0[num_z0];            // 各端口 50.0 + 0.0j Ω
 
     uint32_t       num_freqs;       // 101

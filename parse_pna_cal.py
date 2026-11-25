@@ -337,10 +337,22 @@ def find_and_parse_section5_cal_settings(data: bytes, start_offset: int) -> Opti
     _unk_0 = r.u32()
     timestamp_utc = r.read_cstringw()
 
+    port_table_offset = r.pos
+    # This layout adds two words before the count and one before each port ID.
+    has_port_record_prefix = (
+        data[port_table_offset : port_table_offset + 8] == struct.pack("<II", 1, 0)
+        and data[port_table_offset + 8 : port_table_offset + 11] != CSTRINGW_MARKER
+        and data[port_table_offset + 20 : port_table_offset + 23] == CSTRINGW_MARKER
+    )
+    if has_port_record_prefix:
+        r.pos += 8
+
     port_kits: List[Dict[str, Any]] = []
     port_count = r.u32()
     if 0 <= port_count <= 64:
         for _ in range(port_count):
+            if has_port_record_prefix:
+                _record_prefix = r.u32()
             pidx = r.u32()
             conn = r.read_cstringw()
             kit = r.read_cstringw()
@@ -428,22 +440,36 @@ def parse_section7_error_terms_at(data: bytes, offset: int) -> ErrorTermSet:
     num_z0 = r.u32()
     if num_z0 != num_ports:
         raise ValueError(f"num_z0 ({num_z0}) != num_ports ({num_ports})")
-    z0_flat = r.unpack(f"<{num_z0 * 2}d")
+    z0_offset = r.pos
+    candidate_offsets = (z0_offset,)
+    # The four-port sample has a word before Z0. A legacy double can
+    # also start with these bytes, so check the dimensions before committing.
+    if data[z0_offset : z0_offset + 4] == struct.pack("<I", 1):
+        candidate_offsets = (z0_offset + 4, z0_offset)
+
+    for candidate_offset in candidate_offsets:
+        r.pos = candidate_offset
+        try:
+            z0_flat = r.unpack(f"<{num_z0 * 2}d")
+            num_freqs = r.u32()
+            if not (1 <= num_freqs <= 200001):
+                raise ValueError(f"Implausible num_freqs={num_freqs}")
+            freqs_ghz = list(r.unpack(f"<{num_freqs}d"))
+            _unk1, _unk2, _unk3 = r.unpack("<III")
+            num_terms, num_pts = r.unpack("<II")
+            if num_pts != num_freqs:
+                raise ValueError(
+                    f"Error term num_points ({num_pts}) != num_freqs ({num_freqs})"
+                )
+            if num_terms * num_pts * 16 > r.remaining():
+                raise EOFError("Truncated error term matrix")
+        except (ValueError, EOFError):
+            if candidate_offset == z0_offset:
+                raise
+        else:
+            break
+
     port_z0 = [(z0_flat[i], z0_flat[i + 1]) for i in range(0, len(z0_flat), 2)]
-
-    num_freqs = r.u32()
-    if not (1 <= num_freqs <= 200001):
-        raise ValueError(f"Implausible num_freqs={num_freqs}")
-    freqs_ghz = list(r.unpack(f"<{num_freqs}d"))
-
-    _unk1 = r.u32()
-    _unk2 = r.u32()
-    _unk3 = r.u32()
-
-    num_terms = r.u32()
-    num_pts = r.u32()
-    if num_pts != num_freqs:
-        raise ValueError(f"Error term num_points ({num_pts}) != num_freqs ({num_freqs})")
 
     error_terms: List[List[Tuple[float, float]]] = []
     for _ in range(num_terms):
