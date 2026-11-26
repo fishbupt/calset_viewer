@@ -676,13 +676,22 @@ class CalSetViewerWindow(QMainWindow):
             rows = [
                 ("Magic", h.magic),
                 ("File Version", str(h.file_version)),
-                ("Sub Version A / B", f"{h.sub_ver_a} / {h.sub_ver_b}"),
+                ("Sub Version", str(h.sub_ver_a)),
                 ("CalSet Name", h.calset_name),
                 ("CalSet GUID", h.calset_guid),
                 ("Timestamp (UTC)", h.timestamp_utc),
                 ("Header Flags", f"{h.header_flags} (0x{h.header_flags:X})"),
                 ("Subsystem Schemas", str(len(h.schemas))),
             ]
+            if len(h.calset_records) > 1:
+                rows.append(("CalSet 记录数", str(len(h.calset_records))))
+                for index, record in enumerate(h.calset_records[1:], start=2):
+                    rows.extend([
+                        (f"CalSet {index} 名称", record.name),
+                        (f"CalSet {index} GUID", record.guid),
+                        (f"CalSet {index} 时间戳 (UTC)", record.timestamp_utc),
+                        (f"CalSet {index} 标志", f"0x{record.flags:X}"),
+                    ])
             self._show_kv_table(
                 "Section 1 | File Header 摘要", ["字段", "值"], rows
             )

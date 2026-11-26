@@ -1,16 +1,46 @@
-"""Regression tests for the two PNA calibration record layouts."""
+"""Regression tests for PNA calibration record layouts."""
 
 import struct
 import unittest
+from uuid import UUID
 
 from parse_pna_cal import (
+    BinaryReader,
     encode_cstringw,
     find_and_parse_section5_cal_settings,
     find_and_parse_section7_error_terms,
+    parse_section1_header,
 )
 
 
 class CalRecordLayoutTests(unittest.TestCase):
+    def test_file_header_reads_records_before_schemas(self):
+        names = ["CalSet_DIQ_DIQ_001", "CalSet_DIQ_DIQ_002", "CalSet_DIQ_DIQ_003"]
+        for count, schema_offset in [(1, 0x7A), (3, 0x102)]:
+            with self.subTest(count=count):
+                data = encode_cstringw("PNA Cal File") + struct.pack("<III", 1, 3, count)
+                for index, name in enumerate(names[:count], start=1):
+                    data += encode_cstringw(name) + UUID(int=index).bytes_le
+                    data += struct.pack("<III", 0x01DD7D45, index * 1000, 0x3C)
+                data += struct.pack("<IIHI", 2, 3, 15, 1)
+                self.assertEqual(len(data), schema_offset)
+                data += encode_cstringw("Allegro") + struct.pack("<I", 102)
+                data += struct.pack("<I", 47)  # Marker for the next section.
+
+                reader = BinaryReader(data)
+                header = parse_section1_header(reader)
+
+                self.assertEqual(header.calset_name, names[0])
+                self.assertEqual(header.calset_guid, str(UUID(int=1)))
+                self.assertEqual(header.header_flags, 0x3C)
+                self.assertEqual([record.name for record in header.calset_records], names[:count])
+                self.assertEqual(
+                    [record.guid for record in header.calset_records],
+                    [str(UUID(int=index)) for index in range(1, count + 1)],
+                )
+                self.assertEqual(header.schemas, {"Allegro": 102})
+                self.assertEqual(reader.u32(), 47)
+
     def test_cal_settings_port_table_with_prefixes(self):
         # Words immediately after the timestamp in the four-port sample.
         table = bytes.fromhex("01 00 00 00 00 00 00 00 04 00 00 00")

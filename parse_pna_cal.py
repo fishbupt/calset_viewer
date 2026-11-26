@@ -17,7 +17,7 @@ import json
 import logging
 import struct
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -126,6 +126,14 @@ class ComplexTrace:
 
 
 @dataclass
+class CalSetHeaderRecord:
+    name: str
+    guid: str
+    timestamp_utc: str
+    flags: int
+
+
+@dataclass
 class CalSetHeader:
     magic: str
     file_version: int
@@ -139,6 +147,7 @@ class CalSetHeader:
     unk_3: int
     unk_4: int
     schemas: Dict[str, int] = field(default_factory=dict)
+    calset_records: List[CalSetHeaderRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -238,14 +247,25 @@ def parse_section1_header(r: BinaryReader) -> CalSetHeader:
     file_version = r.u32()
     sub_ver_a = r.u32()
     sub_ver_b = r.u32()
-    calset_name = r.read_cstringw()
-    calset_guid = r.read_guid()
-    timestamp_utc = r.read_filetime_swapped()
-    header_flags = r.u32()
+
+    # In the observed v1.3 headers the third word counts CalSet records.
+    record_count = max(1, sub_ver_b) if (file_version, sub_ver_a) == (1, 3) else 1
+    LOGGER.debug("Section 1 CalSet records: %d, starting at 0x%X", record_count, r.pos)
+    calset_records = [
+        CalSetHeaderRecord(
+            name=r.read_cstringw(),
+            guid=r.read_guid(),
+            timestamp_utc=r.read_filetime_swapped(),
+            flags=r.u32(),
+        )
+        for _ in range(record_count)
+    ]
+    first_record = calset_records[0]
     unk_2 = r.u32()
     unk_3 = r.u32()
     unk_4 = r.u16()
     schema_count = r.u32()
+    LOGGER.debug("Section 1 schema entries: %d, starting at 0x%X", schema_count, r.pos)
     schemas: Dict[str, int] = {}
     for _ in range(schema_count):
         name = r.read_cstringw()
@@ -256,14 +276,15 @@ def parse_section1_header(r: BinaryReader) -> CalSetHeader:
         file_version=file_version,
         sub_ver_a=sub_ver_a,
         sub_ver_b=sub_ver_b,
-        calset_name=calset_name,
-        calset_guid=calset_guid,
-        timestamp_utc=timestamp_utc,
-        header_flags=header_flags,
+        calset_name=first_record.name,
+        calset_guid=first_record.guid,
+        timestamp_utc=first_record.timestamp_utc,
+        header_flags=first_record.flags,
         unk_2=unk_2,
         unk_3=unk_3,
         unk_4=unk_4,
         schemas=schemas,
+        calset_records=calset_records,
     )
 
 
@@ -563,6 +584,7 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
             "calset_name": parsed.header.calset_name,
             "calset_guid": parsed.header.calset_guid,
             "timestamp_utc": parsed.header.timestamp_utc,
+            "calset_records": [asdict(record) for record in parsed.header.calset_records],
             "schema_count": len(parsed.header.schemas),
             "schemas": parsed.header.schemas,
         },
@@ -631,6 +653,10 @@ def print_summary(parsed: ParsedCalFile) -> None:
     print(f"CalSet Name : {h.calset_name}")
     print(f"GUID        : {h.calset_guid}")
     print(f"Timestamp   : {h.timestamp_utc}")
+    if len(h.calset_records) > 1:
+        print(f"CalSet Records: {len(h.calset_records)}")
+        for record in h.calset_records:
+            print(f"  {record.name} ({record.guid})")
     print(f"Schemas     : {len(h.schemas)} modules")
     print(f"Raw Traces  : {len(parsed.raw_measurements)}")
     if parsed.stimulus_header:

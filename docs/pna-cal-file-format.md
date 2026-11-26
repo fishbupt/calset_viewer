@@ -52,15 +52,19 @@ struct SchemaEntry {
     uint32_t schema_version;
 };
 
+struct CalSetHeaderRecord {
+    CStringW         name;           // "CalSet_101pts"
+    GUID             guid;
+    FILETIME_SWAPPED timestamp;
+    uint32_t         flags;          // 48 (0x30)
+};
+
 struct FileHeader {
     CStringW         magic;          // "PNA Cal File"
     uint32_t         file_version;   // 1
     uint32_t         sub_ver_a;      // 3
-    uint32_t         sub_ver_b;      // 1
-    CStringW         calset_name;    // "CalSet_101pts"
-    GUID             calset_guid;    // a1cbab92-2ea7-4d24-a19f-c4b482affaa3
-    FILETIME_SWAPPED timestamp;      // 2026-11-25 07:26:59.7141807 UTC
-    uint32_t         header_flags;   // 48 (0x30)
+    uint32_t         calset_count;  // 原样本为 1，DIQ 样本为 3
+    CalSetHeaderRecord calsets[calset_count];
     uint32_t         unk_2;          // 2
     uint32_t         unk_3;          // 1
     uint16_t         unk_4;          // 15 (0x0F)
@@ -68,6 +72,8 @@ struct FileHeader {
     SchemaEntry      schemas[schema_count];
 };
 ~~~
+
+在已观察的 1.3 文件头中，偏移 `0x24` 的字段是 CalSet 记录数，旧解析器将其命名为 `sub_ver_b`。DIQ 样本的三条记录分别从 `0x28`、`0x6C`、`0xB0` 开始，名称后缀依次为 `001`、`002`、`003`。每条记录各有 GUID、时间戳和标志。记录之后是全局字段，子系统条目数 `39` 位于 `0xFE`，第一条子系统记录从 `0x102` 开始。这些偏移来自该 DIQ 样本，记录名称的长度会影响后续偏移。
 
 样本的子系统名和版本如下，按文件中的顺序列出。跨固件解析后续硬件快照时可参考这些版本号。
 
