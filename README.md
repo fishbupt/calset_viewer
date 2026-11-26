@@ -43,6 +43,14 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 
 包含多条 CalSet 记录的 DIQ 文件可在 **映射标准件测量** 下分别查看。界面和 CSV 保留迹线原有点序和频率值。频率值重复或未按升序排列时，曲线以点索引为横轴，数据表仍显示逐点频率。全量导出的 `mapped_measurements.csv` 包含 `calset_name` 与 `freq_hz` 两列，便于区分同名迹线。
 
+可以用 PNA-X 返回的命名误差项定位 DIQ 文件里的系数数组。将同一 CalSet 的某条误差项的 SCPI ASCII 回复保存为 `term.txt`（交替排列的实部、虚部），然后运行：
+
+```sh
+uv run --locked python tools/locate_error_term.py calset_diq_ch01.cal term.txt
+```
+
+工具报告符合整条参考曲线的文件偏移和数值布局，供验证误差项区段。
+
 ## 导入日志
 
 导入失败时，窗口底部会自动展开 **导入日志**。点击 **复制日志**，即可粘贴本次运行的诊断记录。也可通过 **查看 → 导入日志** 手动打开面板。

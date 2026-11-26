@@ -49,7 +49,10 @@ class CalRecordLayoutTests(unittest.TestCase):
 
     def test_diq_groups_keep_duplicate_keys_and_frequency_points(self):
         names = [f"CalSet_DIQ_{index:03d}" for index in range(1, 4)]
-        guids = [UUID(int=index) for index in range(1, 4)]
+        guids = [
+            UUID(f"12345678-1248-4321-a2b3-1223344556{index:02x}")
+            for index in range(1, 4)
+        ]
         data = encode_cstringw("PNA Cal File") + struct.pack("<III", 1, 3, len(names))
         for name, guid in zip(names, guids):
             data += encode_cstringw(name) + guid.bytes_le + struct.pack("<III", 0, 0, 0x3C)
