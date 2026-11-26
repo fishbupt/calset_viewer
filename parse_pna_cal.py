@@ -139,6 +139,7 @@ class CalSetHeaderRecord:
 class MappedMeasurementGroup:
     calset: CalSetHeaderRecord
     traces: List[ComplexTrace]
+    error_terms: List[ComplexTrace] = field(default_factory=list)
 
 
 @dataclass
@@ -366,10 +367,45 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
     return []
 
 
+def find_and_parse_diq_error_terms(
+    data: bytes, start_offset: int, end_offset: int,
+) -> List[ComplexTrace]:
+    """Find the count-prefixed table of named error terms before the mapped traces."""
+    anchor = encode_cstringw("CrossTalk(1,2)")
+    pos = start_offset + 4
+    while (offset := data.find(anchor, pos, end_offset)) >= 0:
+        pos = offset + len(anchor)
+        table_start = offset - 4
+        count, = struct.unpack_from("<I", data, table_start)
+        if not 1 <= count <= 4096:
+            continue
+
+        reader = BinaryReader(data, table_start)
+        reader.length = end_offset
+        try:
+            traces = parse_trace_map(reader)
+        except (ValueError, EOFError, struct.error) as exc:
+            LOGGER.debug("DIQ error term candidate at 0x%X: %s", table_start, exc)
+            continue
+
+        names = {trace.key for trace in traces}
+        if (
+            len(names) == count
+            and any(name.startswith("Directivity(") for name in names)
+            and any(name.startswith("TransmissionTracking(") for name in names)
+        ):
+            LOGGER.debug(
+                "DIQ named error terms at 0x%X..0x%X: %d terms",
+                table_start, reader.pos, count,
+            )
+            return traces
+    return []
+
+
 def find_and_parse_diq_mapped_groups(
     data: bytes, start_offset: int, records: List[CalSetHeaderRecord]
 ) -> List[MappedMeasurementGroup]:
-    """Read DIQ trace streams between their stimulus GUID and DIQ Stimulus footer."""
+    """Read mapped measurements and named error terms for each DIQ CalSet."""
     trace_anchor = encode_cstringw("SA_0(1,1)")
     stimulus_anchor = encode_cstringw("DIQ Stimulus")
     references = []
@@ -400,10 +436,11 @@ def find_and_parse_diq_mapped_groups(
             continue
 
         if traces and data.startswith(stimulus_anchor, r.pos + 4, limit):
-            groups.append(MappedMeasurementGroup(record, traces))
+            error_terms = find_and_parse_diq_error_terms(data, offset + 16, trace_offset)
+            groups.append(MappedMeasurementGroup(record, traces, error_terms))
             LOGGER.debug(
-                "DIQ mapped stream for %s: %d traces at 0x%X",
-                record.name, len(traces), trace_offset,
+                "DIQ CalSet %s: %d mapped traces at 0x%X, %d named error terms",
+                record.name, len(traces), trace_offset, len(error_terms),
             )
     return groups
 
@@ -644,6 +681,8 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
 def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    named_error_term_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
+    matrix_term_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
     summary = {
         "file_size": parsed.file_size,
         "header": {
@@ -680,7 +719,7 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
         "counts": {
             "raw_measurements": len(parsed.raw_measurements),
             "mapped_measurements": len(parsed.mapped_measurements),
-            "error_terms": len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0,
+            "error_terms": matrix_term_count + named_error_term_count,
             "freq_points": len(parsed.error_term_set.freqs_ghz) if parsed.error_term_set else 0,
         },
     }
@@ -690,6 +729,7 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
                 "calset_name": group.calset.name,
                 "calset_guid": group.calset.guid,
                 "trace_count": len(group.traces),
+                "error_term_count": len(group.error_terms),
             }
             for group in parsed.mapped_measurement_groups
         ]
@@ -711,16 +751,23 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
                     writer.writerow([tr.key, i, f"{re_v:.9g}", f"{im_v:.9g}"])
 
     if parsed.mapped_measurement_groups:
-        with (out_dir / "mapped_measurements.csv").open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["calset_name", "trace_key", "point_index", "freq_hz", "real", "imag"])
-            for group in parsed.mapped_measurement_groups:
-                for tr in group.traces:
-                    for i, (re_v, im_v) in enumerate(tr.points):
-                        frequency = tr.frequencies_hz[i] if tr.frequencies_hz is not None else ""
-                        writer.writerow([
-                            group.calset.name, tr.key, i, frequency, f"{re_v:.9g}", f"{im_v:.9g}",
-                        ])
+        groups = parsed.mapped_measurement_groups
+        for filename, key_header, traces_by_group in (
+            ("mapped_measurements.csv", "trace_key", [group.traces for group in groups]),
+            ("diq_error_terms.csv", "error_term", [group.error_terms for group in groups]),
+        ):
+            if not any(traces_by_group):
+                continue
+            with (out_dir / filename).open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["calset_name", key_header, "point_index", "freq_hz", "real", "imag"])
+                for group, traces in zip(groups, traces_by_group):
+                    for trace in traces:
+                        for i, (re_v, im_v) in enumerate(trace.points):
+                            frequency = trace.frequencies_hz[i] if trace.frequencies_hz is not None else ""
+                            writer.writerow([
+                                group.calset.name, trace.key, i, frequency, f"{re_v:.9g}", f"{im_v:.9g}",
+                            ])
 
     if parsed.error_term_set:
         ets = parsed.error_term_set
@@ -755,7 +802,10 @@ def print_summary(parsed: ParsedCalFile) -> None:
         print(f"Stim Params : {parsed.stimulus_header.params}")
     print(f"Mapped Tr.  : {len(parsed.mapped_measurements)}")
     for group in parsed.mapped_measurement_groups:
-        print(f"  {group.calset.name}: {len(group.traces)} mapped traces")
+        print(
+            f"  {group.calset.name}: {len(group.traces)} mapped traces, "
+            f"{len(group.error_terms)} named error terms"
+        )
     if parsed.metadata:
         print("\n--- Section 6: Metadata ---")
         for k, v in parsed.metadata.items():

@@ -537,12 +537,14 @@ class CalSetViewerWindow(QMainWindow):
         self.setWindowTitle(f"Keysight PNA Cal File Inspector - {path.name}")
         self._populate_tree(parsed)
         self._update_status_bar(path, parsed)
+        matrix_term_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
+        named_term_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
         LOGGER.info(
             "导入完成 | %s | 原始迹线 %d | 映射迹线 %d | 误差项 %d",
             path.name,
             len(parsed.raw_measurements),
             len(parsed.mapped_measurements),
-            len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0,
+            matrix_term_count + named_term_count,
         )
 
     def _update_status_bar(self, path: Path, parsed: ParsedCalFile) -> None:
@@ -607,10 +609,21 @@ class CalSetViewerWindow(QMainWindow):
             sec4.setData(0, Qt.ItemDataRole.UserRole, {"kind": "mapped_groups"})
             for group_index, group in enumerate(p.mapped_measurement_groups):
                 parent = QTreeWidgetItem(sec4, [f"{group.calset.name} ({len(group.traces)})"])
-                self._add_mapped_traces(parent, group.traces, group_index)
+                self._add_trace_nodes(parent, group.traces, group_index)
             sec4.setExpanded(True)
         else:
-            self._add_mapped_traces(sec4, p.mapped_measurements)
+            self._add_trace_nodes(sec4, p.mapped_measurements)
+
+        named_term_count = sum(len(group.error_terms) for group in p.mapped_measurement_groups)
+        if named_term_count:
+            named_terms = QTreeWidgetItem(self.tree, [f"误差项 ({named_term_count})"])
+            named_terms.setData(0, Qt.ItemDataRole.UserRole, {"kind": "diq_error_groups"})
+            for group_index, group in enumerate(p.mapped_measurement_groups):
+                if group.error_terms:
+                    label = f"{group.calset.name} ({len(group.error_terms)})"
+                    parent = QTreeWidgetItem(named_terms, [label])
+                    self._add_trace_nodes(parent, group.error_terms, group_index, source="diq_error")
+            named_terms.setExpanded(True)
 
         # 6. Section 7: Error Terms
         if p.error_term_set:
@@ -636,11 +649,11 @@ class CalSetViewerWindow(QMainWindow):
         else:
             self.tree.setCurrentItem(sec1)
 
-    def _add_mapped_traces(
+    def _add_trace_nodes(
         self, parent: QTreeWidgetItem, traces: List[ComplexTrace],
-        group_index: Optional[int] = None,
+        group_index: Optional[int] = None, *, source: str = "mapped",
     ) -> None:
-        context = {"source": "mapped", "group_index": group_index}
+        context = {"source": source, "group_index": group_index}
         parent.setData(0, Qt.ItemDataRole.UserRole, {"kind": "trace_list", **context})
         for index, trace in enumerate(traces):
             node = QTreeWidgetItem(parent, [trace.key])
@@ -773,33 +786,39 @@ class CalSetViewerWindow(QMainWindow):
             self.text_view.setPlainText(str(p.metadata.get("Cal Acquisition Information", "")))
             self.stack.setCurrentIndex(2)
 
-        elif kind == "mapped_groups":
-            rows_3 = [
-                (group.calset.name, group.calset.guid, str(len(group.traces)))
-                for group in p.mapped_measurement_groups
-            ]
-            self._show_kv_table("DIQ | 映射测量分组", ["CalSet", "GUID", "迹线数"], rows_3)
+        elif kind in ("mapped_groups", "diq_error_groups"):
+            is_error_term = kind == "diq_error_groups"
+            rows_3 = []
+            for group in p.mapped_measurement_groups:
+                count = len(group.error_terms if is_error_term else group.traces)
+                if count:
+                    rows_3.append((group.calset.name, group.calset.guid, str(count)))
+            label = "DIQ | 误差项分组" if is_error_term else "DIQ | 映射测量分组"
+            count_title = "误差项数" if is_error_term else "迹线数"
+            self._show_kv_table(label, ["CalSet", "GUID", count_title], rows_3)
 
         elif kind in ("trace_list", "trace"):
-            is_raw = meta["source"] == "raw"
+            source = meta["source"]
+            section_label = {
+                "raw": "Section 2 | 原始标准件测量",
+                "mapped": "Section 4 | 映射标准件测量",
+                "diq_error": "DIQ | 误差项",
+            }[source]
             group_index = meta.get("group_index")
             group_name = ""
             if group_index is not None:
                 group = p.mapped_measurement_groups[group_index]
-                traces = group.traces
+                traces = group.error_terms if source == "diq_error" else group.traces
                 group_name = group.calset.name
             else:
-                traces = p.raw_measurements if is_raw else p.mapped_measurements
+                traces = p.raw_measurements if source == "raw" else p.mapped_measurements
 
             if kind == "trace_list":
                 rows_3 = [
                     (str(i), tr.key, f"{len(tr.points)} pts (elem_type={tr.elem_type})")
                     for i, tr in enumerate(traces)
                 ]
-                label = (
-                    "Section 2 | 原始标准件测量列表" if is_raw
-                    else "Section 4 | 映射标准件测量列表"
-                )
+                label = f"{section_label}列表"
                 if group_name:
                     label = f"{label} | {group_name}"
                 self._show_kv_table(label, ["#", "键名 (Key)", "数据规格"], rows_3)
@@ -814,10 +833,10 @@ class CalSetViewerWindow(QMainWindow):
                     and len(p.error_term_set.freqs_ghz) == len(tr.points)
                 ):
                     freqs = p.error_term_set.freqs_ghz
-                sec_tag = "Section 2" if is_raw else "Section 4"
+                data_type = "ComplexFloat32" if tr.elem_type == 3 else "ComplexFloat64"
                 self._show_complex_series(
                     title=f"{group_name} | {tr.key}" if group_name else tr.key,
-                    dtype_label=f"{sec_tag} | ComplexFloat32",
+                    dtype_label=f"{section_label} | {data_type}",
                     points=tr.points,
                     freqs_ghz=freqs,
                 )

@@ -43,6 +43,8 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 
 包含多条 CalSet 记录的 DIQ 文件可在 **映射标准件测量** 下分别查看。界面和 CSV 保留迹线原有点序和频率值。频率值重复或未按升序排列时，曲线以点索引为横轴，数据表仍显示逐点频率。全量导出的 `mapped_measurements.csv` 包含 `calset_name` 与 `freq_hz` 两列，便于区分同名迹线。
 
+**误差项** 按 CalSet 显示 `CrossTalk`、`Directivity`、`TransmissionTracking` 等具名复数迹线。全量导出写入 `diq_error_terms.csv`，包含 CalSet 名称、误差项名称、点索引、频率（Hz）、实部和虚部。记录缺少可识别的频率轴时，图形以点索引为横轴，CSV 的 `freq_hz` 留空。
+
 可通过 HiSLIP 从 PNA-X 读取一条误差项。在运行 PNA-X 软件的电脑上，从仓库根目录执行下方命令，按编号选择 CalSet 和误差项。默认地址是 `TCPIP0::127.0.0.1::hislip0::INSTR`，默认输出 `term.txt`。电脑需要可用的 VISA 后端，例如 Keysight VISA。
 
 ```sh

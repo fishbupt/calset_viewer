@@ -59,8 +59,24 @@ class CalRecordLayoutTests(unittest.TestCase):
         data += struct.pack("<IIHIII", 2, 3, 15, 0, 0, 65)
 
         frequencies = (50e6, 50e6, 250e6)
+        term_keys = ["CrossTalk(1,2)", "Directivity(1,1)", "TransmissionTracking(4,3)"]
+        term_frequencies = (10e6, 20e6, 30e6)
         for index, guid in enumerate(guids, start=1):
             data += guid.bytes_le + b"\x00"
+
+            # Another valid trace map shares the first key. The other term names identify
+            # the actual error term map. A third map follows it, as in the DIQ sample.
+            data += struct.pack("<I", 1)
+            data += self.diq_trace(term_keys[0], -1, frequencies, save_axis=False)
+            data += struct.pack("<I", len(term_keys))
+            for key in term_keys:
+                data += self.diq_trace(
+                    key, index + 10, term_frequencies,
+                    save_axis=index == 3 and key == "Directivity(1,1)",
+                )
+            data += struct.pack("<I", 1)
+            data += self.diq_trace("CALALL_R(1)", -2, frequencies)
+
             data += self.diq_trace("SA_0(1,1)", index, frequencies)
             data += self.diq_trace("TotalSourcePowerCorrection(1)", index + 3, frequencies)
             data += struct.pack("<I", 8) + encode_cstringw("DIQ Stimulus")
@@ -75,6 +91,12 @@ class CalRecordLayoutTests(unittest.TestCase):
             ])
             self.assertEqual(group.traces[0].frequencies_hz, frequencies)
             self.assertEqual(group.traces[0].points, [(float(index), 0.0)] * 3)
+            self.assertEqual([trace.key for trace in group.error_terms], term_keys)
+            self.assertIsNone(group.error_terms[0].frequencies_hz)
+            self.assertEqual(
+                group.error_terms[1].frequencies_hz, term_frequencies if index == 3 else None
+            )
+            self.assertEqual(group.error_terms[1].points, [(float(index + 10), 0.0)] * 3)
 
         with TemporaryDirectory() as directory:
             path = Path(directory)
@@ -89,14 +111,33 @@ class CalRecordLayoutTests(unittest.TestCase):
             self.assertEqual(len(rows), 18)
             self.assertEqual([float(row["freq_hz"]) for row in rows[:3]], list(frequencies))
             self.assertEqual(rows[-1]["calset_name"], names[-1])
+            self.assertEqual(summary["counts"]["error_terms"], 9)
+            self.assertEqual(
+                [group["error_term_count"] for group in summary["mapped_measurement_groups"]],
+                [3, 3, 3],
+            )
+            with (path / "diq_error_terms.csv").open(newline="", encoding="utf-8") as f:
+                terms = list(csv.DictReader(f))
+            self.assertEqual(len(terms), 27)
+            self.assertEqual([row["calset_name"] for row in terms[::9]], names)
+            self.assertEqual([row["error_term"] for row in terms[:9:3]], term_keys)
+            self.assertEqual(
+                [float(row["freq_hz"]) for row in terms if row["freq_hz"]],
+                list(term_frequencies),
+            )
+            self.assertTrue(all(row["freq_hz"] for row in terms[21:24]))
+            self.assertTrue(all(row["freq_hz"] == "" for row in terms[:21] + terms[24:]))
 
     @staticmethod
-    def diq_trace(key, value, frequencies):
+    def diq_trace(key, value, frequencies, *, save_axis=True):
         n = len(frequencies)
         inner = struct.pack("<IIHHII", 1, 0, 20, 3, 1, n)
         inner += struct.pack("<ff", value, 0) * n
-        tail = struct.pack("<HII14xIBI", 1, 1, 1, n, 3, 8 * n)
-        tail += struct.pack(f"<{n}d", *frequencies)
+        if save_axis:
+            tail = struct.pack("<HII14xIBI", 1, 1, 1, n, 3, 8 * n)
+            tail += struct.pack(f"<{n}d", *frequencies)
+        else:
+            tail = struct.pack("<HI", 1, 0)
         body = struct.pack("<HIHHI", 1, 1, 2, 0x0100, len(inner)) + inner + tail
         return encode_cstringw(key) + struct.pack("<HI", 1, len(body)) + body
 
