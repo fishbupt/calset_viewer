@@ -10,14 +10,26 @@ from pathlib import Path
 def read_reference(path):
     raw = path.read_bytes()
     encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-    response = raw.decode(encoding).lstrip()
+    values = parse_error_term_response(raw.decode(encoding))
+    if len(values) < 12:
+        raise ValueError("Expected at least six complete Re/Im pairs")
+    if len(set(zip(values[::2], values[1::2]))) < 2:
+        raise ValueError("Choose an error term that varies between points")
+    return values
+
+
+def parse_error_term_response(response):
+    response = response.lstrip()
     if response.startswith("#"):
         if len(response) < 2 or response[1] not in "0123456789":
             raise ValueError("Invalid SCPI block header")
         digits = int(response[1])
         start = 2 + digits
         if digits:
-            stop = start + int(response[2:start])
+            length = response[2:start]
+            if len(length) != digits or not length.isdecimal():
+                raise ValueError("Invalid SCPI block length")
+            stop = start + int(length)
             if stop > len(response) or response[stop:].strip():
                 raise ValueError("SCPI ASCII block length does not match its payload")
             response = response[start:stop]
@@ -25,12 +37,10 @@ def read_reference(path):
             response = response[start:]
 
     values = tuple(float(token) for token in re.split(r"[,\s]+", response) if token)
-    if len(values) < 12 or len(values) % 2:
-        raise ValueError("Expected at least six complete Re/Im pairs")
+    if not values or len(values) % 2:
+        raise ValueError("Expected complete Re/Im pairs")
     if not all(math.isfinite(value) for value in values):
         raise ValueError("Reference contains non-finite values")
-    if len(set(zip(values[::2], values[1::2]))) < 2:
-        raise ValueError("Choose an error term that varies between points")
     return values
 
 

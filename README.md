@@ -43,7 +43,13 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 
 包含多条 CalSet 记录的 DIQ 文件可在 **映射标准件测量** 下分别查看。界面和 CSV 保留迹线原有点序和频率值。频率值重复或未按升序排列时，曲线以点索引为横轴，数据表仍显示逐点频率。全量导出的 `mapped_measurements.csv` 包含 `calset_name` 与 `freq_hz` 两列，便于区分同名迹线。
 
-可以用 PNA-X 返回的命名误差项定位 DIQ 文件里的系数数组。将同一 CalSet 的某条误差项的 SCPI ASCII 回复保存为 `term.txt`（交替排列的实部、虚部），然后运行：
+可通过 HiSLIP 从 PNA-X 读取一条误差项。在运行 PNA-X 软件的电脑上，从仓库根目录执行下方命令，按编号选择 CalSet 和误差项。默认地址是 `TCPIP0::127.0.0.1::hislip0::INSTR`，默认输出 `term.txt`。电脑需要可用的 VISA 后端，例如 Keysight VISA。
+
+```sh
+uv run --locked --with pyvisa python tools/export_error_term.py
+```
+
+也可用 `--calset` 和 `--term` 按名称导出，用 `--list-calsets` 或 `--list-terms` 查看目录。用 `--resource` 指定其它仪器地址，用 `--output` 指定输出文件。每行保存一个频点的实部、虚部，保留点序。选择同一 CalSet 内随频点变化的一条误差项，再运行：
 
 ```sh
 uv run --locked python tools/locate_error_term.py calset_diq_ch01.cal term.txt
