@@ -14,6 +14,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import logging
 import struct
 import uuid
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FILETIME_EPOCH = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
 CSTRINGW_MARKER = b"\xff\xfe\xff"
+LOGGER = logging.getLogger("calset_viewer.parser")
 
 
 class BinaryReader:
@@ -316,7 +318,8 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
             if 1 <= count <= 4096:
                 try:
                     return parse_trace_map(r)
-                except (ValueError, EOFError):
+                except (ValueError, EOFError) as exc:
+                    LOGGER.debug("Section 4 candidate at 0x%X: %s", idx - 4, exc)
                     continue
     return []
 
@@ -328,6 +331,7 @@ def find_and_parse_section5_cal_settings(data: bytes, start_offset: int) -> Opti
     if idx < 0:
         return None
 
+    LOGGER.debug("Section 5 settings header at 0x%X", idx)
     r = BinaryReader(data, idx)
     _marker = r.read_cstringw()
     _ver = r.u16()
@@ -417,7 +421,8 @@ def find_and_parse_section6_metadata(data: bytes, start_offset: int) -> Tuple[Di
             try:
                 meta, end_pos = parse_section6_metadata_at(data, idx - 4)
                 return meta, end_pos
-            except (ValueError, EOFError):
+            except (ValueError, EOFError) as exc:
+                LOGGER.debug("Section 6 candidate at 0x%X: %s", idx - 4, exc)
                 continue
     return {}, None
 
@@ -463,7 +468,8 @@ def parse_section7_error_terms_at(data: bytes, offset: int) -> ErrorTermSet:
                 )
             if num_terms * num_pts * 16 > r.remaining():
                 raise EOFError("Truncated error term matrix")
-        except (ValueError, EOFError):
+        except (ValueError, EOFError) as exc:
+            LOGGER.debug("Section 7 Z0 layout at 0x%X: %s", candidate_offset, exc)
             if candidate_offset == z0_offset:
                 raise
         else:
@@ -498,29 +504,38 @@ def find_and_parse_section7_error_terms(data: bytes, start_offset: int) -> Optio
             return None
         try:
             return parse_section7_error_terms_at(data, idx)
-        except (ValueError, EOFError):
+        except (ValueError, EOFError) as exc:
+            LOGGER.debug("Section 7 candidate at 0x%X: %s", idx, exc)
             pos = idx + 4
 
 
 def parse_cal_file(data: bytes) -> ParsedCalFile:
     r = BinaryReader(data, 0)
+    LOGGER.debug("Section 1 FileHeader at 0x%X", r.pos)
     header = parse_section1_header(r)
+    LOGGER.debug("Section 2 RawMeasurements at 0x%X", r.pos)
     raw_traces = parse_trace_map(r)
 
     saved_pos = r.pos
     stim_header: Optional[StimulusHeader] = None
     try:
+        LOGGER.debug("Section 3 StimulusHeader at 0x%X", saved_pos)
         stim_header = parse_section3_stimulus_header(r)
-    except (ValueError, EOFError):
+    except (ValueError, EOFError) as exc:
+        LOGGER.debug("Section 3 skipped at 0x%X: %s", r.pos, exc)
         stim_header = None
         r.pos = saved_pos
 
     sec3_end_hint = r.pos
+    LOGGER.debug("Section 4 MappedMeasurements search from 0x%X", sec3_end_hint)
     mapped_traces = find_and_parse_section4_mapped(data, sec3_end_hint)
+    LOGGER.debug("Section 5 CalSettings search from 0x%X", sec3_end_hint)
     cal_settings = find_and_parse_section5_cal_settings(data, sec3_end_hint)
+    LOGGER.debug("Section 6 Metadata search from 0x%X", sec3_end_hint)
     metadata, meta_end = find_and_parse_section6_metadata(data, sec3_end_hint)
 
     sec7_start = meta_end if meta_end is not None else sec3_end_hint
+    LOGGER.debug("Section 7 ErrorTermSet search from 0x%X", sec7_start)
     error_term_set = find_and_parse_section7_error_terms(data, sec7_start)
 
     return ParsedCalFile(

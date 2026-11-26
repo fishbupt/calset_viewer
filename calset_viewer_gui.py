@@ -13,17 +13,28 @@ Features:
 from __future__ import annotations
 
 import csv
+import logging
 import math
+import platform
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
+from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR, QStandardPaths, Qt, QUrl
+from PyQt6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDockWidget,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -32,6 +43,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -63,6 +75,16 @@ except ImportError:
 FMT_DB_PHASE = "Mag(dB) / Phase(°)"
 FMT_RE_IM = "Re / Im"
 FMT_LIN_PHASE = "Mag(Lin) / Phase(°)"
+LOGGER = logging.getLogger("calset_viewer")
+
+
+class LogPanelHandler(logging.Handler):
+    def __init__(self, output: QPlainTextEdit) -> None:
+        super().__init__()
+        self.output = output
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.output.appendPlainText(self.format(record))
 
 
 def complex_to_mag_db_phase(re_v: float, im_v: float) -> Tuple[float, float, float]:
@@ -202,8 +224,9 @@ class CalSetViewerWindow(QMainWindow):
         self._build_menu_and_toolbar()
         self._build_central_ui()
         self._build_status_bar()
+        self._build_import_log()
 
-        if initial_file and initial_file.exists():
+        if initial_file is not None:
             self.load_cal_file(initial_file)
 
     def _build_menu_and_toolbar(self) -> None:
@@ -258,6 +281,7 @@ class CalSetViewerWindow(QMainWindow):
         m_view = mb.addMenu("查看(&V)")
         m_view.addAction(self.act_expand_all)
         m_view.addAction(self.act_collapse_all)
+        self.view_menu = m_view
 
         m_help = mb.addMenu("帮助(&H)")
         m_help.addAction(self.act_about)
@@ -370,6 +394,86 @@ class CalSetViewerWindow(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage("就绪")
 
+    def _build_import_log(self) -> None:
+        self.log_dock = QDockWidget("导入日志", self)
+        self.log_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        panel = QWidget(self.log_dock)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 4, 6, 6)
+
+        actions = QHBoxLayout()
+        copy_button = QPushButton("复制日志", panel)
+        copy_button.clicked.connect(self._copy_import_log)
+        actions.addWidget(copy_button)
+        open_button = QPushButton("打开日志目录", panel)
+        actions.addWidget(open_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.log_text = QPlainTextEdit(panel)
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumBlockCount(2000)
+        layout.addWidget(self.log_text)
+        self.log_dock.setWidget(panel)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+        self.view_menu.addAction(self.log_dock.toggleViewAction())
+        self.log_dock.hide()
+
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"
+        )
+        panel_handler = LogPanelHandler(self.log_text)
+        panel_handler.setFormatter(formatter)
+        self._log_handlers: list[logging.Handler] = [panel_handler]
+        LOGGER.setLevel(logging.DEBUG)
+        LOGGER.propagate = False
+        LOGGER.addHandler(panel_handler)
+
+        data_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppLocalDataLocation
+        )
+        log_dir = Path(data_dir) / "logs"
+        open_button.setEnabled(False)
+        try:
+            if not data_dir:
+                raise OSError("系统未提供应用数据目录")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_dir / "calset-viewer.log",
+                maxBytes=1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            LOGGER.warning("无法写入本地日志目录，仍可从界面复制日志。%s", exc)
+        else:
+            file_handler.setFormatter(formatter)
+            LOGGER.addHandler(file_handler)
+            self._log_handlers.append(file_handler)
+            open_button.setToolTip(str(log_dir))
+            log_url = QUrl.fromLocalFile(str(log_dir))
+            open_button.clicked.connect(lambda: QDesktopServices.openUrl(log_url))
+            open_button.setEnabled(True)
+
+        LOGGER.info(
+            "CalSet Viewer 启动 | %s | Python %s | PyQt %s | Qt %s",
+            platform.system(),
+            platform.python_version(),
+            PYQT_VERSION_STR,
+            QT_VERSION_STR,
+        )
+
+    def _copy_import_log(self) -> None:
+        QApplication.clipboard().setText(self.log_text.toPlainText())
+        self.status.showMessage("导入日志已复制", 4000)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        super().closeEvent(event)
+        if event.isAccepted():
+            for handler in self._log_handlers:
+                LOGGER.removeHandler(handler)
+                handler.close()
+
     # ---------------- Drag & Drop ----------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
@@ -383,7 +487,7 @@ class CalSetViewerWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
-            if path.suffix.lower() == ".cal" and path.exists():
+            if path.suffix.lower() == ".cal":
                 self.load_cal_file(path)
                 return
 
@@ -400,24 +504,31 @@ class CalSetViewerWindow(QMainWindow):
             self.load_cal_file(Path(file_path))
 
     def on_reload(self) -> None:
-        if self.current_path and self.current_path.exists():
+        if self.current_path is not None:
             self.load_cal_file(self.current_path)
 
     def load_cal_file(self, path: Path) -> None:
+        LOGGER.info("开始导入 %s", path.name)
+        stage = "加载解析器"
         try:
             from parse_pna_cal import parse_cal_file
 
+            stage = "读取文件"
             raw = path.read_bytes()
+            LOGGER.info("已读取 %s | %d 字节", path.name, len(raw))
+            stage = "解析校准数据"
             parsed = parse_cal_file(raw)
-        except ModuleNotFoundError as exc:
-            if exc.name == "parse_pna_cal":
-                message = "请将兼容的 parse_pna_cal.py 放在 calset_viewer_gui.py 同目录后重试。"
-            else:
-                message = str(exc)
-            QMessageBox.critical(self, "缺少校准文件解析依赖", message)
-            return
         except Exception as exc:
-            QMessageBox.critical(self, "解析失败", f"无法解析文件:\n{path}\n\n错误: {exc}")
+            LOGGER.exception("导入失败 | %s | 阶段：%s", path.name, stage)
+            self.log_dock.show()
+            message = str(exc)
+            if isinstance(exc, ModuleNotFoundError) and exc.name == "parse_pna_cal":
+                message = "请将 parse_pna_cal.py 放在 calset_viewer_gui.py 同目录后重试。"
+            QMessageBox.critical(
+                self,
+                "导入失败",
+                f"{path.name}\n{stage}失败：{message}\n\n可在底部导入日志中复制详细信息。",
+            )
             return
 
         self.current_path = path
@@ -426,6 +537,13 @@ class CalSetViewerWindow(QMainWindow):
         self.setWindowTitle(f"Keysight PNA Cal File Inspector - {path.name}")
         self._populate_tree(parsed)
         self._update_status_bar(path, parsed)
+        LOGGER.info(
+            "导入完成 | %s | 原始迹线 %d | 映射迹线 %d | 误差项 %d",
+            path.name,
+            len(parsed.raw_measurements),
+            len(parsed.mapped_measurements),
+            len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0,
+        )
 
     def _update_status_bar(self, path: Path, parsed: ParsedCalFile) -> None:
         parts = [path.name, f"{parsed.file_size:,} B"]
@@ -809,6 +927,9 @@ class CalSetViewerWindow(QMainWindow):
     # ---------------- Copy & Export ----------------
 
     def on_copy_active_table(self) -> None:
+        if self.log_text.hasFocus():
+            self.log_text.copy()
+            return
         idx = self.stack.currentIndex()
         if idx == 1:
             self.kv_table.copy_selection_to_clipboard()
@@ -895,6 +1016,7 @@ class CalSetViewerWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setApplicationName("CalSetViewer")
     app.setStyle("Fusion")
     initial = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     win = CalSetViewerWindow(initial)
