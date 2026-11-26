@@ -3,6 +3,7 @@
 import argparse
 import re
 import sys
+from contextlib import closing
 from pathlib import Path
 
 from locate_error_term import parse_error_term_response
@@ -88,8 +89,8 @@ def main():
         parser.error("Install PyVISA or run with uv run --locked --with pyvisa")
 
     try:
-        with pyvisa.ResourceManager(args.visa_library or "") as manager:
-            with manager.open_resource(args.resource) as instrument:
+        with closing(pyvisa.ResourceManager(args.visa_library or "")) as manager:
+            with closing(manager.open_resource(args.resource)) as instrument:
                 instrument.timeout = args.timeout_ms
                 instrument.write_termination = "\n"
                 print(f"Instrument: {instrument.query('*IDN?').strip()}")
