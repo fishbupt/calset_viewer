@@ -1,14 +1,20 @@
 """Regression tests for PNA calibration record layouts."""
 
+import csv
+import json
 import struct
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID
 
 from parse_pna_cal import (
     BinaryReader,
     encode_cstringw,
+    export_results,
     find_and_parse_section5_cal_settings,
     find_and_parse_section7_error_terms,
+    parse_cal_file,
     parse_section1_header,
 )
 
@@ -40,6 +46,56 @@ class CalRecordLayoutTests(unittest.TestCase):
                 )
                 self.assertEqual(header.schemas, {"Allegro": 102})
                 self.assertEqual(reader.u32(), 47)
+
+    def test_diq_groups_keep_duplicate_keys_and_frequency_points(self):
+        names = [f"CalSet_DIQ_{index:03d}" for index in range(1, 4)]
+        guids = [UUID(int=index) for index in range(1, 4)]
+        data = encode_cstringw("PNA Cal File") + struct.pack("<III", 1, 3, len(names))
+        for name, guid in zip(names, guids):
+            data += encode_cstringw(name) + guid.bytes_le + struct.pack("<III", 0, 0, 0x3C)
+        data += struct.pack("<IIHIII", 2, 3, 15, 0, 0, 65)
+
+        frequencies = (50e6, 50e6, 250e6)
+        for index, guid in enumerate(guids, start=1):
+            data += guid.bytes_le + b"\x00"
+            data += self.diq_trace("SA_0(1,1)", index, frequencies)
+            data += self.diq_trace("TotalSourcePowerCorrection(1)", index + 3, frequencies)
+            data += struct.pack("<I", 8) + encode_cstringw("DIQ Stimulus")
+
+        parsed = parse_cal_file(data)
+        groups = parsed.mapped_measurement_groups
+        self.assertEqual([group.calset.name for group in groups], names)
+        self.assertEqual(len(parsed.mapped_measurements), 6)
+        for index, group in enumerate(groups, start=1):
+            self.assertEqual([tr.key for tr in group.traces], [
+                "SA_0(1,1)", "TotalSourcePowerCorrection(1)",
+            ])
+            self.assertEqual(group.traces[0].frequencies_hz, frequencies)
+            self.assertEqual(group.traces[0].points, [(float(index), 0.0)] * 3)
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            export_results(parsed, path)
+            summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                [group["trace_count"] for group in summary["mapped_measurement_groups"]],
+                [2, 2, 2],
+            )
+            with (path / "mapped_measurements.csv").open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 18)
+            self.assertEqual([float(row["freq_hz"]) for row in rows[:3]], list(frequencies))
+            self.assertEqual(rows[-1]["calset_name"], names[-1])
+
+    @staticmethod
+    def diq_trace(key, value, frequencies):
+        n = len(frequencies)
+        inner = struct.pack("<IIHHII", 1, 0, 20, 3, 1, n)
+        inner += struct.pack("<ff", value, 0) * n
+        tail = struct.pack("<HII14xIBI", 1, 1, 1, n, 3, 8 * n)
+        tail += struct.pack(f"<{n}d", *frequencies)
+        body = struct.pack("<HIHHI", 1, 1, 2, 0x0100, len(inner)) + inner + tail
+        return encode_cstringw(key) + struct.pack("<HI", 1, len(body)) + body
 
     def test_cal_settings_port_table_with_prefixes(self):
         # Words immediately after the timestamp in the four-port sample.

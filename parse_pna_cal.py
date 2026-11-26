@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 FILETIME_EPOCH = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
 CSTRINGW_MARKER = b"\xff\xfe\xff"
+TRACE_FREQUENCY_HEADER = struct.Struct("<24xIBI")
 LOGGER = logging.getLogger("calset_viewer.parser")
 
 
@@ -123,6 +124,7 @@ class ComplexTrace:
     elem_type: int
     dim_count: int
     points: List[Tuple[float, float]]
+    frequencies_hz: Optional[Tuple[float, ...]] = None
 
 
 @dataclass
@@ -131,6 +133,12 @@ class CalSetHeaderRecord:
     guid: str
     timestamp_utc: str
     flags: int
+
+
+@dataclass
+class MappedMeasurementGroup:
+    calset: CalSetHeaderRecord
+    traces: List[ComplexTrace]
 
 
 @dataclass
@@ -191,6 +199,7 @@ class ParsedCalFile:
     cal_settings: Optional[CalSettingsInfo] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     error_term_set: Optional[ErrorTermSet] = None
+    mapped_measurement_groups: List[MappedMeasurementGroup] = field(default_factory=list)
 
 
 def read_complex_float_trace(r: BinaryReader, key: str) -> ComplexTrace:
@@ -229,6 +238,17 @@ def read_complex_float_trace(r: BinaryReader, key: str) -> ComplexTrace:
 
     if r.pos > outer_end:
         raise ValueError(f"Trace '{key}' overran outer_size ({r.pos} > {outer_end})")
+    if outer_end > r.length:
+        raise EOFError(f"Trace '{key}' extends beyond EOF at 0x{outer_end:X}")
+
+    frequencies_hz = None
+    inner_end = inner_start + inner_size
+    axis_size = num_points * 8
+    axis_start = inner_end + TRACE_FREQUENCY_HEADER.size
+    if num_points and r.pos <= inner_end and outer_end == axis_start + axis_size:
+        axis_count, axis_type, byte_count = TRACE_FREQUENCY_HEADER.unpack_from(r.data, inner_end)
+        if (axis_count, axis_type, byte_count) == (num_points, 3, axis_size):
+            frequencies_hz = struct.unpack_from(f"<{num_points}d", r.data, axis_start)
     r.pos = outer_end
 
     return ComplexTrace(
@@ -237,6 +257,7 @@ def read_complex_float_trace(r: BinaryReader, key: str) -> ComplexTrace:
         elem_type=elem_type,
         dim_count=dim_count,
         points=points,
+        frequencies_hz=frequencies_hz,
     )
 
 
@@ -343,6 +364,48 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
                     LOGGER.debug("Section 4 candidate at 0x%X: %s", idx - 4, exc)
                     continue
     return []
+
+
+def find_and_parse_diq_mapped_groups(
+    data: bytes, start_offset: int, records: List[CalSetHeaderRecord]
+) -> List[MappedMeasurementGroup]:
+    """Read DIQ trace streams between their stimulus GUID and DIQ Stimulus footer."""
+    trace_anchor = encode_cstringw("SA_0(1,1)")
+    stimulus_anchor = encode_cstringw("DIQ Stimulus")
+    references = []
+    for record in records:
+        offset = data.find(uuid.UUID(record.guid).bytes_le, start_offset)
+        if offset >= 0:
+            references.append((offset, record))
+    references.sort(key=lambda reference: reference[0])
+
+    groups: List[MappedMeasurementGroup] = []
+    for index, (offset, record) in enumerate(references):
+        limit = references[index + 1][0] if index + 1 < len(references) else len(data)
+        trace_offset = data.find(trace_anchor, offset + 16, limit)
+        if trace_offset < 0:
+            continue
+
+        r = BinaryReader(data, trace_offset)
+        traces: List[ComplexTrace] = []
+        try:
+            while r.pos < limit and r.peek_is_cstringw():
+                key = r.read_cstringw()
+                trace = read_complex_float_trace(r, key)
+                if r.pos > limit:
+                    raise ValueError("trace crosses the next CalSet reference")
+                traces.append(trace)
+        except (ValueError, EOFError, struct.error) as exc:
+            LOGGER.debug("DIQ mapped stream for %s at 0x%X: %s", record.name, trace_offset, exc)
+            continue
+
+        if traces and data.startswith(stimulus_anchor, r.pos + 4, limit):
+            groups.append(MappedMeasurementGroup(record, traces))
+            LOGGER.debug(
+                "DIQ mapped stream for %s: %d traces at 0x%X",
+                record.name, len(traces), trace_offset,
+            )
+    return groups
 
 
 def find_and_parse_section5_cal_settings(data: bytes, start_offset: int) -> Optional[CalSettingsInfo]:
@@ -549,7 +612,13 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
 
     sec3_end_hint = r.pos
     LOGGER.debug("Section 4 MappedMeasurements search from 0x%X", sec3_end_hint)
-    mapped_traces = find_and_parse_section4_mapped(data, sec3_end_hint)
+    mapped_groups = []
+    if data.find(encode_cstringw("DIQ Stimulus"), saved_pos) >= 0:
+        mapped_groups = find_and_parse_diq_mapped_groups(data, saved_pos, header.calset_records)
+    if mapped_groups:
+        mapped_traces = [trace for group in mapped_groups for trace in group.traces]
+    else:
+        mapped_traces = find_and_parse_section4_mapped(data, sec3_end_hint)
     LOGGER.debug("Section 5 CalSettings search from 0x%X", sec3_end_hint)
     cal_settings = find_and_parse_section5_cal_settings(data, sec3_end_hint)
     LOGGER.debug("Section 6 Metadata search from 0x%X", sec3_end_hint)
@@ -568,6 +637,7 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
         cal_settings=cal_settings,
         metadata=metadata,
         error_term_set=error_term_set,
+        mapped_measurement_groups=mapped_groups,
     )
 
 
@@ -614,14 +684,23 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
             "freq_points": len(parsed.error_term_set.freqs_ghz) if parsed.error_term_set else 0,
         },
     }
+    if parsed.mapped_measurement_groups:
+        summary["mapped_measurement_groups"] = [
+            {
+                "calset_name": group.calset.name,
+                "calset_guid": group.calset.guid,
+                "trace_count": len(group.traces),
+            }
+            for group in parsed.mapped_measurement_groups
+        ]
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    for filename, traces in (
-        ("raw_measurements.csv", parsed.raw_measurements),
-        ("mapped_measurements.csv", parsed.mapped_measurements),
-    ):
+    trace_files = [("raw_measurements.csv", parsed.raw_measurements)]
+    if not parsed.mapped_measurement_groups:
+        trace_files.append(("mapped_measurements.csv", parsed.mapped_measurements))
+    for filename, traces in trace_files:
         if not traces:
             continue
         with (out_dir / filename).open("w", newline="", encoding="utf-8") as f:
@@ -630,6 +709,18 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
             for tr in traces:
                 for i, (re_v, im_v) in enumerate(tr.points):
                     writer.writerow([tr.key, i, f"{re_v:.9g}", f"{im_v:.9g}"])
+
+    if parsed.mapped_measurement_groups:
+        with (out_dir / "mapped_measurements.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["calset_name", "trace_key", "point_index", "freq_hz", "real", "imag"])
+            for group in parsed.mapped_measurement_groups:
+                for tr in group.traces:
+                    for i, (re_v, im_v) in enumerate(tr.points):
+                        frequency = tr.frequencies_hz[i] if tr.frequencies_hz is not None else ""
+                        writer.writerow([
+                            group.calset.name, tr.key, i, frequency, f"{re_v:.9g}", f"{im_v:.9g}",
+                        ])
 
     if parsed.error_term_set:
         ets = parsed.error_term_set
@@ -663,6 +754,8 @@ def print_summary(parsed: ParsedCalFile) -> None:
         print(f"Port Config : {parsed.stimulus_header.port_config}")
         print(f"Stim Params : {parsed.stimulus_header.params}")
     print(f"Mapped Tr.  : {len(parsed.mapped_measurements)}")
+    for group in parsed.mapped_measurement_groups:
+        print(f"  {group.calset.name}: {len(group.traces)} mapped traces")
     if parsed.metadata:
         print("\n--- Section 6: Metadata ---")
         for k, v in parsed.metadata.items():

@@ -603,14 +603,14 @@ class CalSetViewerWindow(QMainWindow):
 
         # 5. Section 4: Mapped Measurements
         sec4 = QTreeWidgetItem(self.tree, [f"映射标准件测量 ({len(p.mapped_measurements)})"])
-        sec4.setData(0, Qt.ItemDataRole.UserRole, {"kind": "trace_list", "source": "mapped"})
-        for idx, tr in enumerate(p.mapped_measurements):
-            item = QTreeWidgetItem(sec4, [tr.key])
-            item.setData(
-                0,
-                Qt.ItemDataRole.UserRole,
-                {"kind": "trace", "source": "mapped", "index": idx},
-            )
+        if p.mapped_measurement_groups:
+            sec4.setData(0, Qt.ItemDataRole.UserRole, {"kind": "mapped_groups"})
+            for group_index, group in enumerate(p.mapped_measurement_groups):
+                parent = QTreeWidgetItem(sec4, [f"{group.calset.name} ({len(group.traces)})"])
+                self._add_mapped_traces(parent, group.traces, group_index)
+            sec4.setExpanded(True)
+        else:
+            self._add_mapped_traces(sec4, p.mapped_measurements)
 
         # 6. Section 7: Error Terms
         if p.error_term_set:
@@ -636,25 +636,36 @@ class CalSetViewerWindow(QMainWindow):
         else:
             self.tree.setCurrentItem(sec1)
 
+    def _add_mapped_traces(
+        self, parent: QTreeWidgetItem, traces: List[ComplexTrace],
+        group_index: Optional[int] = None,
+    ) -> None:
+        context = {"source": "mapped", "group_index": group_index}
+        parent.setData(0, Qt.ItemDataRole.UserRole, {"kind": "trace_list", **context})
+        for index, trace in enumerate(traces):
+            node = QTreeWidgetItem(parent, [trace.key])
+            node.setData(
+                0, Qt.ItemDataRole.UserRole, {"kind": "trace", "index": index, **context}
+            )
+
     def on_filter_tree(self, query: str) -> None:
-        q = query.strip().lower()
-        for i in range(self.tree.topLevelItemCount()):
-            parent = self.tree.topLevelItem(i)
-            if parent is None:
-                continue
-            parent_match = q in parent.text(0).lower()
-            any_child_visible = False
-            for j in range(parent.childCount()):
-                child = parent.child(j)
-                if child is None:
-                    continue
-                child_match = (not q) or parent_match or (q in child.text(0).lower())
-                child.setHidden(not child_match)
-                if child_match:
-                    any_child_visible = True
-            parent.setHidden(bool(q) and not parent_match and not any_child_visible)
-            if q and any_child_visible:
-                parent.setExpanded(True)
+        query = query.strip().lower()
+
+        def filter_item(item: QTreeWidgetItem, ancestor_matches: bool) -> bool:
+            matches = ancestor_matches or query in item.text(0).lower()
+            visible_children = [
+                filter_item(item.child(i), matches) for i in range(item.childCount())
+            ]
+            visible = matches or any(visible_children)
+            item.setHidden(not visible)
+            if query and any(visible_children):
+                item.setExpanded(True)
+            return visible
+
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            if item is not None:
+                filter_item(item, False)
 
     # ---------------- Selection & Rendering ----------------
 
@@ -762,45 +773,54 @@ class CalSetViewerWindow(QMainWindow):
             self.text_view.setPlainText(str(p.metadata.get("Cal Acquisition Information", "")))
             self.stack.setCurrentIndex(2)
 
-        elif kind == "trace_list":
-            traces = (
-                p.raw_measurements
-                if meta["source"] == "raw"
-                else p.mapped_measurements
-            )
+        elif kind == "mapped_groups":
             rows_3 = [
-                (
-                    str(i),
-                    tr.key,
-                    f"{len(tr.points)} pts (elem_type={tr.elem_type})",
-                )
-                for i, tr in enumerate(traces)
+                (group.calset.name, group.calset.guid, str(len(group.traces)))
+                for group in p.mapped_measurement_groups
             ]
-            label = "Section 2 | 原始标准件测量列表" if meta["source"] == "raw" else "Section 4 | 映射标准件测量列表"
-            self._show_kv_table(label, ["#", "键名 (Key)", "数据规格"], rows_3)
+            self._show_kv_table("DIQ | 映射测量分组", ["CalSet", "GUID", "迹线数"], rows_3)
 
-        elif kind == "trace":
-            traces = (
-                p.raw_measurements
-                if meta["source"] == "raw"
-                else p.mapped_measurements
-            )
-            tr: ComplexTrace = traces[meta["index"]]
-            freqs = (
-                p.error_term_set.freqs_ghz
-                if (
-                    p.error_term_set
-                    and len(p.error_term_set.freqs_ghz) == len(tr.points)
+        elif kind in ("trace_list", "trace"):
+            is_raw = meta["source"] == "raw"
+            group_index = meta.get("group_index")
+            group_name = ""
+            if group_index is not None:
+                group = p.mapped_measurement_groups[group_index]
+                traces = group.traces
+                group_name = group.calset.name
+            else:
+                traces = p.raw_measurements if is_raw else p.mapped_measurements
+
+            if kind == "trace_list":
+                rows_3 = [
+                    (str(i), tr.key, f"{len(tr.points)} pts (elem_type={tr.elem_type})")
+                    for i, tr in enumerate(traces)
+                ]
+                label = (
+                    "Section 2 | 原始标准件测量列表" if is_raw
+                    else "Section 4 | 映射标准件测量列表"
                 )
-                else None
-            )
-            sec_tag = "Section 2" if meta["source"] == "raw" else "Section 4"
-            self._show_complex_series(
-                title=tr.key,
-                dtype_label=f"{sec_tag} | ComplexFloat32",
-                points=tr.points,
-                freqs_ghz=freqs,
-            )
+                if group_name:
+                    label = f"{label} | {group_name}"
+                self._show_kv_table(label, ["#", "键名 (Key)", "数据规格"], rows_3)
+            else:
+                tr = traces[meta["index"]]
+                freqs = None
+                if tr.frequencies_hz is not None:
+                    freqs = [frequency / 1e9 for frequency in tr.frequencies_hz]
+                elif (
+                    group_index is None
+                    and p.error_term_set
+                    and len(p.error_term_set.freqs_ghz) == len(tr.points)
+                ):
+                    freqs = p.error_term_set.freqs_ghz
+                sec_tag = "Section 2" if is_raw else "Section 4"
+                self._show_complex_series(
+                    title=f"{group_name} | {tr.key}" if group_name else tr.key,
+                    dtype_label=f"{sec_tag} | ComplexFloat32",
+                    points=tr.points,
+                    freqs_ghz=freqs,
+                )
 
         elif kind == "error_overview" and p.error_term_set:
             ets = p.error_term_set
@@ -867,8 +887,12 @@ class CalSetViewerWindow(QMainWindow):
         n_pts = len(points)
         if freqs_ghz:
             freq_str = f"{freqs_ghz[0]:.4g} - {freqs_ghz[-1]:.4g} GHz"
-            x_vals = freqs_ghz
-            x_label = "Frequency (GHz)"
+            if any(a >= b for a, b in zip(freqs_ghz, freqs_ghz[1:])):
+                x_vals = [float(i) for i in range(n_pts)]
+                x_label = "Point Index"
+            else:
+                x_vals = freqs_ghz
+                x_label = "Frequency (GHz)"
         else:
             freq_str = f"0 - {n_pts - 1}"
             x_vals = [float(i) for i in range(n_pts)]
