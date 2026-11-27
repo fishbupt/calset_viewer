@@ -13,8 +13,10 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import logging
+import math
 import re
 import struct
 import uuid
@@ -189,6 +191,10 @@ class ErrorTermSet:
     port_z0: List[Tuple[float, float]]
     freqs_ghz: List[float]
     error_terms: List[List[Tuple[float, float]]]
+    term_names: Dict[int, str] = field(default_factory=dict)
+
+    def term_label(self, index: int) -> str:
+        return self.term_names.get(index, f"Term {index}")
 
 
 @dataclass
@@ -352,20 +358,36 @@ def parse_section3_stimulus_header(r: BinaryReader) -> StimulusHeader:
     )
 
 
+MAPPED_KEY = re.compile(
+    r"(?:S[ABC]_\d+|Thru_(?:[0-9_]+|RefRatio))\([1-9]\d*,[1-9]\d*\)"
+)
+MAPPED_KEY_PREFIX = re.compile(
+    re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:S\x00[ABC]\x00_\x00|"
+    + re.escape("Thru_".encode("utf-16le"))
+    + rb")"
+)
+
+
 def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[ComplexTrace]:
-    """Locate Section 4 MappedMeasurements by finding the SA_0(1,1) or Thru_ anchor."""
-    for anchor_str in ("SA_0(1,1)", "SA_0(2,2)", "Thru_12(1,1)"):
-        pat = encode_cstringw(anchor_str)
-        idx = data.find(pat, start_offset)
-        if idx >= 4:
-            r = BinaryReader(data, idx - 4)
-            count = struct.unpack_from("<I", data, idx - 4)[0]
-            if 1 <= count <= 4096:
-                try:
-                    return parse_trace_map(r)
-                except (ValueError, EOFError) as exc:
-                    LOGGER.debug("Section 4 candidate at 0x%X: %s", idx - 4, exc)
-                    continue
+    """Locate a counted mapped trace table by its first standard key."""
+    for match in MAPPED_KEY_PREFIX.finditer(data, start_offset + 4):
+        offset = match.start()
+        reader = BinaryReader(data, offset - 4)
+        count = reader.u32()
+        if not 1 <= count <= 4096:
+            continue
+        try:
+            key = reader.read_cstringw()
+            if not MAPPED_KEY.fullmatch(key):
+                continue
+            reader.pos = offset - 4
+            traces = parse_trace_map(reader)
+        except (ValueError, EOFError, struct.error) as exc:
+            LOGGER.debug("Section 4 candidate at 0x%X: %s", offset - 4, exc)
+            continue
+        if len({trace.key for trace in traces}) == count and all(trace.points for trace in traces):
+            LOGGER.debug("Section 4 mapped trace table at 0x%X: %d traces", offset - 4, count)
+            return traces
     return []
 
 
@@ -696,7 +718,7 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
     if mapped_groups:
         mapped_traces = [trace for group in mapped_groups for trace in group.traces]
     else:
-        mapped_traces = find_and_parse_section4_mapped(data, sec3_end_hint)
+        mapped_traces = find_and_parse_section4_mapped(data, saved_pos)
     LOGGER.debug("Section 5 CalSettings search from 0x%X", sec3_end_hint)
     cal_settings = find_and_parse_section5_cal_settings(data, sec3_end_hint)
     LOGGER.debug("Section 6 Metadata search from 0x%X", sec3_end_hint)
@@ -721,6 +743,70 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
         mapped_measurement_groups=mapped_groups,
         named_error_terms=named_error_terms,
     )
+
+
+def match_matrix_error_term_names(
+    matrix: ErrorTermSet, references: Dict[str, List[Tuple[float, float]]],
+) -> Tuple[Dict[int, str], Dict[str, List[int]]]:
+    """Assign names only when the full Re/Im trace has a one-to-one match."""
+    candidates = {}
+    unique_hits: Dict[int, List[str]] = {}
+    for name, reference in references.items():
+        hits = []
+        for index, values in enumerate(matrix.error_terms):
+            if reference and len(reference) == len(values) and all(
+                math.isclose(actual, expected, rel_tol=5e-7, abs_tol=1e-15)
+                for point, ref_point in zip(values, reference)
+                for actual, expected in zip(point, ref_point)
+            ):
+                hits.append(index)
+        candidates[name] = hits
+        if len(hits) == 1:
+            unique_hits.setdefault(hits[0], []).append(name)
+    labels = {index: names[0] for index, names in unique_hits.items() if len(names) == 1}
+    return labels, candidates
+
+
+def matrix_labels_path(cal_path: Path) -> Path:
+    return cal_path.with_name(cal_path.name + ".terms.json")
+
+
+def save_matrix_error_term_names(cal_path: Path, data: bytes, names: Dict[int, str]) -> Path:
+    path = matrix_labels_path(cal_path)
+    payload = {"sha256": hashlib.sha256(data).hexdigest(), "names": names}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def load_matrix_error_term_names(parsed: ParsedCalFile, cal_path: Path, data: bytes) -> None:
+    matrix = parsed.error_term_set
+    path = matrix_labels_path(cal_path)
+    if matrix is None or not path.is_file():
+        return
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("sha256") != hashlib.sha256(data).hexdigest():
+            raise ValueError("SHA-256 does not match the selected .cal file")
+        raw_names = payload.get("names")
+        if not isinstance(raw_names, dict):
+            raise ValueError("Missing error term name mapping")
+        labels = {}
+        for raw_index, name in raw_names.items():
+            index = int(raw_index)
+            if str(index) != raw_index or not 0 <= index < len(matrix.error_terms):
+                raise ValueError(f"Invalid error term index {raw_index!r}")
+            if not isinstance(name, str) or not name.strip() or not name.isprintable():
+                raise ValueError(f"Invalid name for error term {index}")
+            labels[index] = name
+        if len(set(labels.values())) != len(labels):
+            raise ValueError("Duplicate error term names")
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("Ignored error term names in %s: %s", path.name, exc)
+        return
+
+    matrix.term_names = labels
+    LOGGER.info("Loaded %d matrix error term names from %s", len(labels), path.name)
 
 
 def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
@@ -780,6 +866,8 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
             }
             for group in parsed.mapped_measurement_groups
         ]
+    if parsed.error_term_set and parsed.error_term_set.term_names:
+        summary["matrix_error_term_names"] = parsed.error_term_set.term_names
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -874,6 +962,8 @@ def print_summary(parsed: ParsedCalFile) -> None:
             f"({ets.freqs_ghz[0]:.6g} .. {ets.freqs_ghz[-1]:.6g} GHz)"
         )
         print(f"  Error Terms : {len(ets.error_terms)} terms x {len(ets.freqs_ghz)} pts")
+        for index, name in sorted(ets.term_names.items()):
+            print(f"  Term {index}: {name}")
 
 
 def inspect_error_terms(data: bytes) -> None:
@@ -953,10 +1043,48 @@ def inspect_error_terms(data: bytes) -> None:
         print(f"  Additional keys omitted: {count - 8}")
 
 
+def inspect_mapped_measurements(data: bytes) -> None:
+    """Report trace names and record boundaries for an unrecognized mapped table."""
+    reader = BinaryReader(data)
+    header = parse_section1_header(reader)
+    raw_traces = parse_trace_map(reader)
+    start_offset = reader.pos
+    mapped = find_and_parse_section4_mapped(data, start_offset)
+    print(f"{header.calset_name} | {len(data)} bytes | raw={len(raw_traces)} | mapped={len(mapped)}")
+    print(f"End of raw measurements: 0x{start_offset:X}")
+    print("Raw keys:", [trace.key for trace in raw_traces[:12]])
+    print("\n[Complex trace records after raw measurements]")
+    offset = data.find(CSTRINGW_MARKER, start_offset)
+    count = 0
+    while offset >= 0 and count < 24:
+        reader.pos = offset
+        try:
+            key = reader.read_cstringw()
+            flag, size = reader.unpack("<HI")
+            if key and key.isprintable() and flag == 1 and 40 <= size <= reader.remaining():
+                fields = data[reader.pos:reader.pos + 14]
+                if fields[:6] == struct.pack("<HI", 1, 1):
+                    count += 1
+                    count_bytes = data[max(0, offset - 4):offset].hex(" ").upper()
+                    print(f"  0x{offset:X}: {key} | before: {count_bytes} | size: 0x{size:X}")
+        except (ValueError, EOFError):
+            pass
+        offset = data.find(CSTRINGW_MARKER, offset + len(CSTRINGW_MARKER))
+    if count == 0:
+        print("  No recognizable complex trace records")
+    elif count == 24:
+        print("  Output limited to the first 24 candidate records")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Parse Keysight PNA/PNA-X *.cal files")
     ap.add_argument("cal_file", type=Path, help="Path to the .cal file")
     mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--inspect-mapped-measurements",
+        action="store_true",
+        help="Report candidate mapped measurement keys and record headers",
+    )
     mode.add_argument(
         "--inspect-error-terms",
         action="store_true",
@@ -974,8 +1102,12 @@ def main() -> None:
     if args.inspect_error_terms:
         inspect_error_terms(data)
         return
+    if args.inspect_mapped_measurements:
+        inspect_mapped_measurements(data)
+        return
 
     parsed = parse_cal_file(data)
+    load_matrix_error_term_names(parsed, args.cal_file, data)
     print_summary(parsed)
     if args.export_dir:
         export_results(parsed, args.export_dir)

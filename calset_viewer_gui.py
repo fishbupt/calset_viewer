@@ -511,13 +511,14 @@ class CalSetViewerWindow(QMainWindow):
         LOGGER.info("开始导入 %s", path.name)
         stage = "加载解析器"
         try:
-            from parse_pna_cal import parse_cal_file
+            from parse_pna_cal import load_matrix_error_term_names, parse_cal_file
 
             stage = "读取文件"
             raw = path.read_bytes()
             LOGGER.info("已读取 %s | %d 字节", path.name, len(raw))
             stage = "解析校准数据"
             parsed = parse_cal_file(raw)
+            load_matrix_error_term_names(parsed, path, raw)
         except Exception as exc:
             LOGGER.exception("导入失败 | %s | 阶段：%s", path.name, stage)
             self.log_dock.show()
@@ -615,6 +616,7 @@ class CalSetViewerWindow(QMainWindow):
             sec4.setExpanded(True)
         else:
             self._add_trace_nodes(sec4, p.mapped_measurements)
+            sec4.setExpanded(bool(p.mapped_measurements))
 
         named_term_count = sum(len(group.error_terms) for group in p.mapped_measurement_groups)
         if named_term_count:
@@ -639,7 +641,7 @@ class CalSetViewerWindow(QMainWindow):
             freq_node.setData(0, Qt.ItemDataRole.UserRole, {"kind": "freq_axis"})
 
             for t_idx in range(n_terms):
-                t_node = QTreeWidgetItem(sec7, [f"Term {t_idx}"])
+                t_node = QTreeWidgetItem(sec7, [ets.term_label(t_idx)])
                 t_node.setData(
                     0,
                     Qt.ItemDataRole.UserRole,
@@ -880,7 +882,7 @@ class CalSetViewerWindow(QMainWindow):
             t_idx = int(meta["index"])
             ets = p.error_term_set
             self._show_complex_series(
-                title=f"Term {t_idx}",
+                title=ets.term_label(t_idx),
                 dtype_label=f"Section 7 | ComplexFloat64 | Offset: 0x{ets.offset:X}",
                 points=ets.error_terms[t_idx],
                 freqs_ghz=ets.freqs_ghz,

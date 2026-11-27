@@ -80,7 +80,13 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--list-calsets", action="store_true")
     mode.add_argument("--list-terms", action="store_true")
+    mode.add_argument(
+        "--label-cal", type=Path, metavar="CAL",
+        help="Match all PNA terms to the matrix in a local .cal and save its names",
+    )
     args = parser.parse_args()
+    if args.label_cal and args.term:
+        parser.error("--label-cal compares every error term; omit --term")
     if args.timeout_ms <= 0:
         parser.error("--timeout-ms must be positive")
     try:
@@ -89,6 +95,20 @@ def main():
         parser.error("Install PyVISA or run with uv run --locked --with pyvisa")
 
     try:
+        if args.label_cal:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from parse_pna_cal import (
+                match_matrix_error_term_names,
+                parse_cal_file,
+                save_matrix_error_term_names,
+            )
+
+            cal_data = args.label_cal.read_bytes()
+            parsed = parse_cal_file(cal_data)
+            matrix = parsed.error_term_set
+            if matrix is None or not matrix.error_terms:
+                raise ValueError("The .cal does not contain a recognized error term matrix")
+
         with closing(pyvisa.ResourceManager(args.visa_library or "")) as manager:
             with closing(manager.open_resource(args.resource)) as instrument:
                 instrument.timeout = args.timeout_ms
@@ -96,6 +116,8 @@ def main():
                 print(f"Instrument: {instrument.query('*IDN?').strip()}")
 
                 calset = args.calset
+                if args.label_cal and calset is None:
+                    calset = parsed.header.calset_name
                 if args.list_calsets or calset is None:
                     names = split_catalog(instrument.query(":CSET:CAT?"))
                     calset = select_from_catalog(names, "CalSets", args.list_calsets)
@@ -103,12 +125,41 @@ def main():
                         return
 
                 term = args.term
-                if args.list_terms or term is None:
+                if args.label_cal or args.list_terms or term is None:
                     names = split_catalog(instrument.query(f":CSET:ETER:CAT? {quote_scpi_name(calset)}"))
-                    term = select_from_catalog(names, "error terms", args.list_terms)
-                    if args.list_terms:
-                        return
-                values = read_error_term(instrument, calset, term)
+                    if not args.label_cal:
+                        term = select_from_catalog(names, "error terms", args.list_terms)
+                        if args.list_terms:
+                            return
+                if args.label_cal:
+                    if not names:
+                        raise ValueError(f"No error terms returned for {calset!r}")
+                    references = {}
+                    for name in dict.fromkeys(names):
+                        try:
+                            values = read_error_term(instrument, calset, name)
+                        except ValueError as exc:
+                            print(f"{name}: {exc}", file=sys.stderr)
+                            continue
+                        references[name] = list(zip(values[::2], values[1::2]))
+                else:
+                    values = read_error_term(instrument, calset, term)
+
+        if args.label_cal:
+            labels, candidates = match_matrix_error_term_names(matrix, references)
+            for name, indices in candidates.items():
+                if not indices:
+                    status = "no match"
+                elif len(indices) == 1 and labels.get(indices[0]) == name:
+                    status = f"Term {indices[0]}"
+                else:
+                    status = f"ambiguous (indices: {indices})"
+                print(f"{name}: {status}")
+            if not labels:
+                raise ValueError("No unique full-trace matches for the selected CalSet")
+            path = save_matrix_error_term_names(args.label_cal, cal_data, labels)
+            print(f"Saved {len(labels)}/{len(matrix.error_terms)} matrix names to {path.resolve()}")
+            return
 
         pairs = list(zip(values[::2], values[1::2]))
         args.output.write_text(

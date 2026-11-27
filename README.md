@@ -43,6 +43,22 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 
 在已识别的单端口格式中，左侧 **误差项** 节点按文件内的名称显示 `Directivity`、`ReflectionTracking` 和 `SourceMatch`。全量导出生成 `named_error_terms.csv`。记录缺少可识别的频率轴时，曲线和数据表保留点索引，CSV 的 `freq_hz` 留空。
 
+如果单端口文件的 **映射标准件测量** 仍为空，可以输出原始测量键名，以及其后的复数记录候选：
+
+```sh
+uv run --locked python parse_pna_cal.py "your_calset.cal" --inspect-mapped-measurements
+```
+
+## 矩阵误差项名称
+
+如果两端口或四端口文件的矩阵只显示 `Term 0` 等编号，可在能连接 PNA 的电脑上将导出文件与仪器上的同一 CalSet 逐点匹配：
+
+```sh
+uv run --locked --with pyvisa python tools/export_error_term.py --label-cal "your_calset.cal"
+```
+
+默认按文件内的 CalSet 名称查询仪器，必要时用 `--calset` 指定仪器上的名称。匹配成功会在 .cal 旁生成 `your_calset.cal.terms.json`。重新打开 .cal 时，Viewer 会在校验文件 SHA-256 后读取匹配到的名称。同值、歧义或无法匹配的迹线继续显示编号。全量导出的 `summary.json` 同时记录已验证的编号与名称。
+
 ## Differential IQ 校准数据
 
 包含多条 CalSet 记录的 DIQ 文件可在 **映射标准件测量** 下分别查看。界面和 CSV 保留迹线原有点序和频率值。频率值重复或未按升序排列时，曲线以点索引为横轴，数据表仍显示逐点频率。全量导出的 `mapped_measurements.csv` 包含 `calset_name` 与 `freq_hz` 两列，便于区分同名迹线。

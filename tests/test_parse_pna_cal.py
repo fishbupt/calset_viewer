@@ -10,12 +10,17 @@ from uuid import UUID
 
 from parse_pna_cal import (
     BinaryReader,
+    ParsedCalFile,
     encode_cstringw,
     export_results,
+    find_and_parse_section4_mapped,
     find_and_parse_section5_cal_settings,
     find_and_parse_section7_error_terms,
+    load_matrix_error_term_names,
+    match_matrix_error_term_names,
     parse_cal_file,
     parse_section1_header,
+    save_matrix_error_term_names,
 )
 
 
@@ -128,6 +133,53 @@ class CalRecordLayoutTests(unittest.TestCase):
             self.assertTrue(all(row["freq_hz"] for row in terms[21:24]))
             self.assertTrue(all(row["freq_hz"] == "" for row in terms[:21] + terms[24:]))
 
+    def test_mapped_table_accepts_other_standard_and_port_and_skips_decoy(self):
+        data = (
+            struct.pack("<I", 4) + encode_cstringw("SA_0(1,1)") + b"\x00" * 6
+            + struct.pack("<I", 2)
+            + self.complex_trace("SB_1(3,3)", 1, range(3))
+            + self.complex_trace("SC_0(3,3)", 2, range(3))
+        )
+
+        traces = find_and_parse_section4_mapped(data, 0)
+
+        self.assertEqual([trace.key for trace in traces], ["SB_1(3,3)", "SC_0(3,3)"])
+        self.assertEqual(traces[1].points, [(2.0, 0.0)] * 3)
+
+    def test_matrix_names_require_unique_full_traces_and_matching_file_hash(self):
+        data = self.error_terms(b"", struct.pack("<dd", 50.0, 0.0))
+        matrix = find_and_parse_section7_error_terms(data, 0)
+        matrix.error_terms[1] = matrix.error_terms[0]
+        reference = {
+            "Directivity(1,1)": matrix.error_terms[2],
+            "SourceMatch(1,1)": matrix.error_terms[0],
+            "Wrong(1,1)": [*matrix.error_terms[3][:-1], (3.0, 999.0)],
+            "AliasA(1,1)": matrix.error_terms[4],
+            "AliasB(1,1)": matrix.error_terms[4],
+        }
+
+        labels, candidates = match_matrix_error_term_names(matrix, reference)
+
+        self.assertEqual(labels, {2: "Directivity(1,1)"})
+        self.assertEqual(candidates["SourceMatch(1,1)"], [0, 1])
+        self.assertEqual(candidates["Wrong(1,1)"], [])
+        self.assertEqual(candidates["AliasA(1,1)"], [4])
+        header = parse_section1_header(BinaryReader(
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHI", 0, 0, 0x3C, 2, 1, 15, 0)
+        ))
+        parsed = ParsedCalFile(len(data), header, [], error_term_set=matrix)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.cal"
+            save_matrix_error_term_names(path, data, labels)
+            load_matrix_error_term_names(parsed, path, data + b"\x00")
+            self.assertEqual(matrix.term_label(2), "Term 2")
+            load_matrix_error_term_names(parsed, path, data)
+            self.assertEqual(matrix.term_label(2), "Directivity(1,1)")
+            self.assertEqual(matrix.term_label(0), "Term 0")
+
     def test_one_port_named_error_terms_before_metadata_or_matrix(self):
         name = "CalSet_OnePort"
         data = (
@@ -152,12 +204,15 @@ class CalRecordLayoutTests(unittest.TestCase):
         record_offset = first_offset + len(encode_cstringw(keys[0]))
         self.assertEqual(struct.unpack_from("<I", data, record_offset + 2)[0], 0x9C68)
         self.assertEqual(struct.unpack_from("<I", data, record_offset + 16)[0], 0x9C54)
+        data += struct.pack("<I", 1)
+        data += self.complex_trace("SB_1(1,1)", 0.25, points, save_axis=False)
         data += struct.pack("<7I", 0, 1006, 0, 0, 0, 0, 0)
 
         parsed = parse_cal_file(data)
 
         self.assertIsNone(parsed.error_term_set)
         self.assertEqual([trace.key for trace in parsed.named_error_terms], keys)
+        self.assertEqual([trace.key for trace in parsed.mapped_measurements], ["SB_1(1,1)"])
         for value, trace in enumerate(parsed.named_error_terms, start=1):
             self.assertIsNone(trace.frequencies_hz)
             self.assertEqual(trace.points, [(float(value), 0.0)] * 5000)
