@@ -4,6 +4,8 @@ import csv
 import json
 import struct
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID
@@ -16,6 +18,7 @@ from parse_pna_cal import (
     find_and_parse_section4_mapped,
     find_and_parse_section5_cal_settings,
     find_and_parse_section7_error_terms,
+    inspect_error_terms,
     load_matrix_error_term_names,
     match_matrix_error_term_names,
     parse_cal_file,
@@ -295,6 +298,33 @@ class CalRecordLayoutTests(unittest.TestCase):
         self.assertEqual(len(error_terms.error_terms), 24)
         self.assertEqual(len(error_terms.error_terms[-1]), 101)
         self.assertEqual(error_terms.error_terms[-1][-1], (23.0, -100.0))
+
+    def test_inspect_error_terms_reports_matrix_metadata_as_file_offsets(self):
+        header = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+        data = header + self.error_terms(struct.pack("<I", 1), struct.pack("<dd", 50.0, 0.0))
+        matrix_end = len(data)
+        matrix_start = matrix_end - 24 * 101 * 16
+        payload_text = b"CrossTalk"
+        data = data[:matrix_start] + payload_text + data[matrix_start + len(payload_text):]
+        trailer_prefix = b"Directivity\x00\x01"
+        data += trailer_prefix + "Load_Match".encode("utf-16le")
+
+        output = StringIO()
+        with redirect_stdout(output):
+            inspect_error_terms(data)
+
+        report = output.getvalue()
+        self.assertIn("Normal import: 24 matrix terms, 0 named terms", report)
+        self.assertIn(f"Complex data: 0x{matrix_start:X}..0x{matrix_end:X}", report)
+        self.assertIn(f"{matrix_end:08X}  44 69 72", report)
+        self.assertIn(f"0x{matrix_end:X}: Directivity (ascii)", report)
+        self.assertIn(f"0x{matrix_end + len(trailer_prefix):X}: Load_Match (utf-16le)", report)
+        self.assertNotIn("CrossTalk", report)
 
     def test_error_terms_without_prefix_and_z0_starts_with_one(self):
         first_z0 = bytes.fromhex("01 00 00 00 00 00 49 40")

@@ -192,6 +192,7 @@ class ErrorTermSet:
     freqs_ghz: List[float]
     error_terms: List[List[Tuple[float, float]]]
     term_names: Dict[int, str] = field(default_factory=dict)
+    data_bounds: Optional[Tuple[int, int]] = None
 
     def term_label(self, index: int) -> str:
         return self.term_names.get(index, f"Term {index}")
@@ -661,6 +662,7 @@ def parse_section7_error_terms_at(data: bytes, offset: int) -> ErrorTermSet:
 
     port_z0 = [(z0_flat[i], z0_flat[i + 1]) for i in range(0, len(z0_flat), 2)]
 
+    matrix_start = r.pos
     error_terms: List[List[Tuple[float, float]]] = []
     for _ in range(num_terms):
         flat = struct.unpack(f"<{num_pts * 2}d", r.read_bytes(num_pts * 16))
@@ -675,6 +677,7 @@ def parse_section7_error_terms_at(data: bytes, offset: int) -> ErrorTermSet:
         port_z0=port_z0,
         freqs_ghz=freqs_ghz,
         error_terms=error_terms,
+        data_bounds=(matrix_start, r.pos),
     )
 
 
@@ -966,15 +969,73 @@ def print_summary(parsed: ParsedCalFile) -> None:
             print(f"  Term {index}: {name}")
 
 
+def print_hex_range(data: bytes, start: int, end: int) -> None:
+    for offset in range(start, end, 16):
+        print(f"  {offset:08X}  {data[offset:min(offset + 16, end)].hex(' ').upper()}")
+
+
+def inspect_matrix_metadata(data: bytes, matrix: ErrorTermSet) -> None:
+    if matrix.data_bounds is None:
+        return
+    start, end = matrix.data_bounds
+    print("\n[Matrix boundaries and trailer]")
+    print(
+        f"  Complex data: 0x{start:X}..0x{end:X} (end exclusive) "
+        f"| {len(matrix.error_terms)} rows x {len(matrix.freqs_ghz)} points"
+    )
+    print("  Header through port information, up to 112 bytes:")
+    head_end = min(start - 20, matrix.offset + 112)
+    print_hex_range(data, matrix.offset, head_end)
+    print("  Words between frequency axis and matrix:")
+    print_hex_range(data, start - 20, start)
+    print(f"  Trailer: {len(data) - end} bytes")
+    trailer_limit = 4096
+    if len(data) - end <= trailer_limit:
+        print_hex_range(data, end, len(data))
+    else:
+        half_limit = trailer_limit // 2
+        print_hex_range(data, end, end + half_limit)
+        print(f"  ... {len(data) - end - trailer_limit} bytes omitted ...")
+        print_hex_range(data, len(data) - half_limit, len(data))
+
+    print("\n[Embedded term text candidates]")
+    names = (
+        "Directivity", "Source Match", "Reflection Tracking", "Load Match",
+        "Transmission Tracking", "Cross Talk", "Isolation", "Receiver Match",
+        "Response Tracking", "Switch Term",
+    )
+    for encoding in ("ascii", "utf-16le"):
+        spellings = {
+            name.replace(" ", separator)
+            for name in names
+            for separator in ("", " ", "_", "-")
+        }
+        pattern = re.compile(
+            b"|".join(re.escape(name.encode(encoding)) for name in sorted(spellings)),
+            re.IGNORECASE,
+        )
+        count = 0
+        for region_start, region_end in ((0, start), (end, len(data))):
+            for match in pattern.finditer(data, region_start, region_end):
+                count += 1
+                if count <= 32:
+                    print(f"  0x{match.start():X}: {match.group().decode(encoding)} ({encoding})")
+        print(f"  {encoding}: {count} matches")
+        if count > 32:
+            print(f"  Additional matches omitted: {count - 32}")
+
+
 def inspect_error_terms(data: bytes) -> None:
     """Report possible error-term layouts, without exporting trace values."""
     print(f"File size: {len(data)} bytes")
+    matrix = None
     try:
         parsed = parse_cal_file(data)
     except (ValueError, EOFError, struct.error) as exc:
         print(f"Normal import: {type(exc).__name__}: {exc}")
     else:
-        matrix_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
+        matrix = parsed.error_term_set
+        matrix_count = len(matrix.error_terms) if matrix else 0
         named_count = len(parsed.named_error_terms) + sum(
             len(group.error_terms) for group in parsed.mapped_measurement_groups
         )
@@ -1041,6 +1102,8 @@ def inspect_error_terms(data: bytes) -> None:
     print(f"Found: {count}")
     if count > 8:
         print(f"  Additional keys omitted: {count - 8}")
+    if matrix is not None:
+        inspect_matrix_metadata(data, matrix)
 
 
 def inspect_mapped_measurements(data: bytes) -> None:

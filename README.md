@@ -81,13 +81,13 @@ uv run --locked python tools/locate_error_term.py calset_diq_ch01.cal term.txt
 
 ## 误差项识别诊断
 
-如果 `.cal` 能打开，但左侧没有 **误差项矩阵** 或 **误差项**，可以在仓库目录执行：
+如果左侧缺少 **误差项矩阵** 或 **误差项**，或矩阵只显示 `Term 0` 等编号，可以在仓库目录运行离线诊断。
 
 ```sh
 uv run --locked python parse_pna_cal.py your_calset.cal --inspect-error-terms
 ```
 
-命令报告普通导入得到的误差项数量、候选区段偏移及校验结果，以及匹配到的具名误差项记录。可复制输出用于定位文件布局。
+命令报告误差项数量、候选区段偏移、校验结果和已识别的具名记录。如果文件包含误差项矩阵，还会输出矩阵边界、尾部字节及矩阵外的 ASCII 和 UTF-16LE 名称候选。候选文字只用于定位，矩阵行与名称的对应关系需要由文件结构确认。
 
 ## 导入日志
 
