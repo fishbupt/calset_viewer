@@ -284,6 +284,49 @@ class CalRecordLayoutTests(unittest.TestCase):
             {"port": 1, "connector": "3.5 mm female", "cal_kit": "Legacy kit"},
         ])
 
+    def test_two_port_matrix_reconstructs_named_terms_without_z0_prefix(self):
+        header = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet_2Port") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+        coefficients = [
+            1, 2j,  # A
+            0.46875j, 0.25 + 0.5j,  # B
+            0.25, -1,  # C
+            -0.125j, -0.5j,  # D
+            2, 4,  # E
+            1, 1j,  # F
+        ]
+        matrix = (
+            struct.pack("<8I", 0, 1006, 1, 1, 2, 1, 2, 2)
+            + struct.pack("<dd", 50.0, 0.0) * 2
+            + struct.pack("<I2d", 2, 0.01, 0.02)
+            + struct.pack("<5I", 1, 1, 0, 12, 2)
+            + b"".join(struct.pack("<dd", value.real, value.imag) * 2 for value in coefficients)
+        )
+        parsed = parse_cal_file(header + matrix)
+        self.assertEqual(len(parsed.error_term_set.error_terms), 12)
+        traces = {trace.key: trace for trace in parsed.reconstructed_error_terms}
+        expected = {
+            "Directivity(1,1)": 0.125j,
+            "Directivity(2,2)": 0.25,
+            "SourceMatch(1,1)": 0.25,
+            "SourceMatch(2,2)": 0.5j,
+            "ReflectionTracking(1,1)": 0.5j,
+            "ReflectionTracking(2,2)": 0.25,
+            "LoadMatch(1,2)": 0.5,
+            "LoadMatch(2,1)": 0.25j,
+            "TransmissionTracking(1,2)": 0.25j,
+            "TransmissionTracking(2,1)": 0.125j,
+        }
+        self.assertEqual(set(traces), set(expected))
+        for name, value in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(traces[name].points, [(value.real, value.imag)] * 2)
+                self.assertEqual(traces[name].frequencies_hz, (10e6, 20e6))
+
     def test_four_port_matrix_reconstructs_named_terms_and_exports_both_views(self):
         header = (
             encode_cstringw("PNA Cal File")

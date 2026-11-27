@@ -793,11 +793,12 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
         if error_term_set is None:
             named_error_terms = find_and_parse_one_port_error_terms(data, saved_pos)
         elif (
-            len(set(error_term_set.port_ids)) == len(error_term_set.port_ids) == 4
-            and len(error_term_set.error_terms) == 24
+            len(error_term_set.port_ids) in (2, 4)
+            and len(set(error_term_set.port_ids)) == len(error_term_set.port_ids)
+            and len(error_term_set.error_terms) == 6 * len(error_term_set.port_ids)
             and all(point == (1.0, 0.0) for point in error_term_set.error_terms[0])
         ):
-            # The verified four-port layout stores A for the first port as unity.
+            # The verified grouped layout stores A for the first port as unity.
             terms, _ = reconstruct_grouped_matrix_terms(error_term_set)
             frequencies_hz = tuple(f * 1e9 for f in error_term_set.freqs_ghz)
             reconstructed_error_terms = [
