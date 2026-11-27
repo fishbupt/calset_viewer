@@ -20,6 +20,7 @@ with patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
         check_grouped_reflection_rows,
         main,
         print_coefficient_samples,
+        print_grouped_matrix_verification,
         print_mismatch_diagnostics,
         print_sign_and_reflection_checks,
     )
@@ -239,3 +240,54 @@ class VerifyCalTests(unittest.TestCase):
         self.assertIn("From fitted common scale: R-D*M -> [10]", report)
         self.assertIn("Point indices (0-based): 0, 1, 2", report)
         self.assertIn("Directivity(2,2): (0.25,0)  (0.25,0)  (0.25,0)", report)
+
+    def test_grouped_matrix_reconstructs_error_terms_including_transmission_direction(self):
+        ports = [1, 3]
+        a = [1.0, 2.0 - 0.5j]
+        e = [100.0j, 130.0 + 15.0j]
+        directivity = [0.375 - 0.125j, -0.29 + 0.4j]
+        source_match = [2.0 - 0.25j, 0.3 + 1.25j]
+        reflection = [1e-5 - 4e-6j, 0.011 + 0.003j]
+        load_match = [0.125 + 0.025j, -0.35 + 0.7j]
+        b = [x * (r - d * m) for x, r, d, m in zip(a, reflection, directivity, source_match)]
+        b[0] += 2e-8j  # Rounding before cancellation in the reflection calculation.
+        c = [x * m for x, m in zip(a, source_match)]
+        d = [-x * value for x, value in zip(a, directivity)]
+        f = [x * value for x, value in zip(e, load_match)]
+
+        def samples(value):
+            return [(value.real, value.imag)] * 3
+
+        matrix = ErrorTermSet(
+            offset=0, magic=1006, ver_a=1, ver_b=1, port_ids=ports,
+            port_z0=[(50.0, 0.0)] * 2, freqs_ghz=[0.01, 0.02, 0.03],
+            error_terms=[samples(value) for block in (a, b, c, d, e, f) for value in block],
+        )
+        reference = {
+            f"{name}({port},{port})": samples(value)
+            for name, values in [("Directivity", directivity), ("SourceMatch", source_match),
+                                 ("ReflectionTracking", reflection)]
+            for port, value in zip(ports, values)
+        }
+        reference.update({
+            "LoadMatch(1,3)": samples(load_match[0]),
+            "LoadMatch(3,1)": samples(load_match[1]),
+            "TransmissionTracking(1,3)": samples(a[1] * reflection[1] / e[0]),
+            "TransmissionTracking(3,1)": samples(a[0] * reflection[0] / e[1]),
+            "CrossTalk(1,3)": samples(0j),
+            "CrossTalk(3,1)": samples(0j),
+        })
+        output = StringIO()
+        with redirect_stdout(output):
+            print_grouped_matrix_verification(matrix, reference)
+        report = output.getvalue()
+        self.assertIn("Grouped model matches: 10/10 predicted terms", report)
+        self.assertIn("Transmission relation matches: 2/2 using simulator R", report)
+        self.assertIn("Simulator CrossTalk: 2/2 traces are zero", report)
+
+        reference["TransmissionTracking(1,3)"] = reference["TransmissionTracking(3,1)"]
+        output = StringIO()
+        with redirect_stdout(output):
+            print_grouped_matrix_verification(matrix, reference)
+        self.assertIn("TransmissionTracking(1,3): DIFFER", output.getvalue())
+        self.assertIn("Transmission relation matches: 1/2 using simulator R", output.getvalue())

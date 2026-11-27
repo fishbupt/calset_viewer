@@ -74,6 +74,8 @@ uv run --locked --with pyvisa python .\tools\export_error_term.py --verify-cal "
 `[CalSet identity]` 记录文件大小、SHA-256 和原 GUID，并查询原 GUID 是否存在于模拟器的 CalSet 存储。有未确认的矩阵行时，`[Matrix mismatch diagnostics]` 还会给出不同数据布局下的匹配数量，以及原布局下最近矩阵行的复数残差。残差大小只能用来定位差异。
 `[Sign and reflection checks]` 逐点检验取负关系，并比较反射修正公式的各个系数。对于行数是端口数六倍的矩阵，还会检查方向性和源匹配的候选行是否共享同一归一化因子。`[Coefficient samples]` 报告同一频率轴的三个点，供对比存储行与模拟器具名误差项。
 
+`[Grouped matrix verification]` 对六组按端口排列的矩阵行应用候选公式，与模拟器的具名数据逐点核对。反射跟踪的容差按相减前的系数幅度估算，以检查单精度舍入影响。传输跟踪还会用模拟器给出的反射跟踪独立核对系数关系。脚本单独统计模拟器的全零串扰项。
+
 ### 用单项修改验证存储关系
 
 当逐点匹配只确认部分行时，可以在模拟器中做一次差分实验。以下命令会创建两个新 CalSet 副本，在其中一个副本的 `Directivity(1,1)` 上加入三个复数标记，并用仪器读回值核对标记。请在测试用的 Simulator 会话中运行。

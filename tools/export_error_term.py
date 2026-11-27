@@ -376,6 +376,116 @@ def print_coefficient_samples(matrix, references):
         print(f"  {name}: {values}")
 
 
+def print_grouped_matrix_verification(matrix, references):
+    ports = matrix.port_ids
+    port_count = len(ports)
+    if (
+        port_count not in (2, 4)
+        or (matrix.ver_a, matrix.ver_b) != (1, 1)
+        or len(matrix.error_terms) != 6 * port_count
+    ):
+        return
+
+    rows = [[complex(*point) for point in row] for row in matrix.error_terms]
+    reference = {
+        name.casefold(): [complex(*point) for point in points]
+        for name, points in references.items()
+    }
+    reconstructed = {}
+    reflection = {}
+    invalid = complex(math.nan, math.nan)
+
+    for index, port in enumerate(ports):
+        a, b, c, d, e, f = rows[index::port_count]
+        directivity = [-d_i / a_i if a_i else invalid for a_i, d_i in zip(a, d)]
+        source_match = [c_i / a_i if a_i else invalid for a_i, c_i in zip(a, c)]
+        load_match = [f_i / e_i if e_i else invalid for e_i, f_i in zip(e, f)]
+        # R is the difference between two often nearly equal terms. Use
+        # their magnitudes to estimate the effects of float32 rounding.
+        b_over_a = [b_i / a_i if a_i else invalid for a_i, b_i in zip(a, b)]
+        dm = [d_i * m_i for d_i, m_i in zip(directivity, source_match)]
+        reflection[port] = [
+            (left + right, abs(left) + abs(right)) for left, right in zip(b_over_a, dm)
+        ]
+
+        reconstructed[f"Directivity({port},{port})"] = [(value, abs(value)) for value in directivity]
+        reconstructed[f"SourceMatch({port},{port})"] = [(value, abs(value)) for value in source_match]
+        reconstructed[f"ReflectionTracking({port},{port})"] = reflection[port]
+        for source in ports:
+            if source != port:
+                reconstructed[f"LoadMatch({port},{source})"] = [(value, abs(value)) for value in load_match]
+
+    transmission_links = {}
+    for receiver_index, receiver in enumerate(ports):
+        e = rows[4 * port_count + receiver_index]
+        for source_index, source in enumerate(ports):
+            if source == receiver:
+                continue
+            a = rows[source_index]
+            ratio = [a_i / e_i if e_i else invalid for a_i, e_i in zip(a, e)]
+            name = f"TransmissionTracking({receiver},{source})"
+            reconstructed[name] = [
+                (k * value, abs(k) * scale)
+                for k, (value, scale) in zip(ratio, reflection[source])
+            ]
+            source_reflection = reference.get(f"reflectiontracking({source},{source})")
+            if source_reflection is not None:
+                values = [k * r for k, r in zip(ratio, source_reflection)]
+                transmission_links[name] = [(value, abs(value)) for value in values]
+
+    print("\n[Grouped matrix verification]")
+    print("  A..F: six successive port-indexed blocks in the file")
+    print("  Directivity=-D/A | SourceMatch=C/A | ReflectionTracking=B/A+Directivity*SourceMatch")
+    print("  LoadMatch(receiver,source)=F_receiver/E_receiver")
+    print("  TransmissionTracking(receiver,source)=A_source*ReflectionTracking(source,source)/E_receiver")
+    # Bound float32 rounding in the native calculation in terms of the
+    # intermediate magnitudes, especially before the reflection subtraction.
+    rounding_factor = 8 * 2.0 ** -23
+    matched = 0
+    tested_links = 0
+    matched_links = 0
+    for name, predicted in sorted(reconstructed.items()):
+        expected = reference.get(name.casefold())
+        if expected is None or len(expected) != len(predicted):
+            print(f"  {name}: NOT VERIFIED (reference missing)")
+            continue
+        worst = 0.0
+        max_residual = 0.0
+        for (value, scale), actual in zip(predicted, expected):
+            residual = abs(value - actual)
+            if not (math.isfinite(residual) and math.isfinite(scale)):
+                worst = max_residual = math.inf
+                break
+            max_residual = max(max_residual, residual)
+            bound = 1e-12 + rounding_factor * max(scale, abs(actual))
+            worst = max(worst, residual / bound)
+        status = "MATCH" if worst <= 1 else "DIFFER"
+        if worst <= 1:
+            matched += 1
+
+        link_detail = ""
+        if name in transmission_links:
+            tested_links += 1
+            link = all(
+                math.isfinite(scale)
+                and abs(value - actual) <= 1e-12 + rounding_factor * max(scale, abs(actual))
+                for (value, scale), actual in zip(transmission_links[name], expected)
+            )
+            matched_links += link
+            link_detail = f" | using simulator R: {'MATCH' if link else 'DIFFER'}"
+        print(
+            f"  {name}: {status} | max residual={max_residual:.6g} "
+            f"| tolerance fraction={worst:.6g}{link_detail}"
+        )
+    print(f"  Grouped model matches: {matched}/{len(reconstructed)} predicted terms")
+    if tested_links:
+        print(f"  Transmission relation matches: {matched_links}/{tested_links} using simulator R")
+    crosstalk = [points for name, points in reference.items() if name.startswith("crosstalk(")]
+    if crosstalk:
+        zero_traces = sum(all(value == 0 for value in points) for points in crosstalk)
+        print(f"  Simulator CrossTalk: {zero_traces}/{len(crosstalk)} traces are zero")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resource", default=DEFAULT_RESOURCE, help="VISA resource address")
@@ -487,6 +597,8 @@ def main():
                     print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
                     print_sign_and_reflection_checks(matrix, references, match_matrix_error_term_names)
                     print_coefficient_samples(matrix, references)
+                if references:
+                    print_grouped_matrix_verification(matrix, references)
                 return
             for name, indices in candidates.items():
                 if not indices:
