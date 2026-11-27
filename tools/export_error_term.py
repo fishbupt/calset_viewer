@@ -377,61 +377,22 @@ def print_coefficient_samples(matrix, references):
 
 
 def print_grouped_matrix_verification(matrix, references):
-    ports = matrix.port_ids
-    port_count = len(ports)
-    if (
-        port_count not in (2, 4)
-        or (matrix.ver_a, matrix.ver_b) != (1, 1)
-        or len(matrix.error_terms) != 6 * port_count
-    ):
+    from parse_pna_cal import reconstruct_grouped_matrix_terms
+
+    reconstructed, transmission_ratios = reconstruct_grouped_matrix_terms(matrix)
+    if not reconstructed:
         return
 
-    rows = [[complex(*point) for point in row] for row in matrix.error_terms]
     reference = {
         name.casefold(): [complex(*point) for point in points]
         for name, points in references.items()
     }
-    reconstructed = {}
-    reflection = {}
-    invalid = complex(math.nan, math.nan)
-
-    for index, port in enumerate(ports):
-        a, b, c, d, e, f = rows[index::port_count]
-        directivity = [-d_i / a_i if a_i else invalid for a_i, d_i in zip(a, d)]
-        source_match = [c_i / a_i if a_i else invalid for a_i, c_i in zip(a, c)]
-        load_match = [f_i / e_i if e_i else invalid for e_i, f_i in zip(e, f)]
-        # R is the difference between two often nearly equal terms. Use
-        # their magnitudes to estimate the effects of float32 rounding.
-        b_over_a = [b_i / a_i if a_i else invalid for a_i, b_i in zip(a, b)]
-        dm = [d_i * m_i for d_i, m_i in zip(directivity, source_match)]
-        reflection[port] = [
-            (left + right, abs(left) + abs(right)) for left, right in zip(b_over_a, dm)
-        ]
-
-        reconstructed[f"Directivity({port},{port})"] = [(value, abs(value)) for value in directivity]
-        reconstructed[f"SourceMatch({port},{port})"] = [(value, abs(value)) for value in source_match]
-        reconstructed[f"ReflectionTracking({port},{port})"] = reflection[port]
-        for source in ports:
-            if source != port:
-                reconstructed[f"LoadMatch({port},{source})"] = [(value, abs(value)) for value in load_match]
-
     transmission_links = {}
-    for receiver_index, receiver in enumerate(ports):
-        e = rows[4 * port_count + receiver_index]
-        for source_index, source in enumerate(ports):
-            if source == receiver:
-                continue
-            a = rows[source_index]
-            ratio = [a_i / e_i if e_i else invalid for a_i, e_i in zip(a, e)]
-            name = f"TransmissionTracking({receiver},{source})"
-            reconstructed[name] = [
-                (k * value, abs(k) * scale)
-                for k, (value, scale) in zip(ratio, reflection[source])
-            ]
-            source_reflection = reference.get(f"reflectiontracking({source},{source})")
-            if source_reflection is not None:
-                values = [k * r for k, r in zip(ratio, source_reflection)]
-                transmission_links[name] = [(value, abs(value)) for value in values]
+    for name, (source, ratio) in transmission_ratios.items():
+        source_reflection = reference.get(f"reflectiontracking({source},{source})")
+        if source_reflection is not None and len(source_reflection) == len(ratio):
+            values = [k * r for k, r in zip(ratio, source_reflection)]
+            transmission_links[name] = [(value, abs(value)) for value in values]
 
     print("\n[Grouped matrix verification]")
     print("  A..F: six successive port-indexed blocks in the file")

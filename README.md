@@ -59,6 +59,12 @@ uv run --locked python parse_pna_cal.py "your_calset.cal" --inspect-mapped-measu
 
 ## 矩阵误差项名称
 
+### 离线查看四端口误差项
+
+打开匹配已验证布局的四端口 `.cal` 后，左侧 **误差项（重建）** 显示 36 项及原始频率轴。程序用文件中的六组系数恢复方向性、源匹配、反射跟踪、负载匹配和传输跟踪。原始 24 行系数可在 **误差项矩阵** 中查看。
+
+导出时，`reconstructed_error_terms.csv` 保存具名重建结果，`error_terms.csv` 保存原始矩阵。串扰项和两端口矩阵的具名误差项仍需独立验证。
+
 ### 用 VNA Simulator 验证矩阵行顺序
 
 在 VNA Simulator 中 Recall 要验证的 CalSet 后，在运行模拟器的 Windows 电脑上执行。

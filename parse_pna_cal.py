@@ -210,6 +210,7 @@ class ParsedCalFile:
     error_term_set: Optional[ErrorTermSet] = None
     mapped_measurement_groups: List[MappedMeasurementGroup] = field(default_factory=list)
     named_error_terms: List[ComplexTrace] = field(default_factory=list)
+    reconstructed_error_terms: List[ComplexTrace] = field(default_factory=list)
 
 
 def read_complex_float_trace(r: BinaryReader, key: str) -> ComplexTrace:
@@ -696,6 +697,62 @@ def find_and_parse_section7_error_terms(data: bytes, start_offset: int) -> Optio
             pos = idx + 4
 
 
+def reconstruct_grouped_matrix_terms(
+    matrix: ErrorTermSet,
+) -> Tuple[Dict[str, List[Tuple[complex, float]]], Dict[str, Tuple[int, List[complex]]]]:
+    """Return named terms with rounding scales and transmission ratios for verification."""
+    ports = matrix.port_ids
+    port_count = len(ports)
+    if (
+        port_count not in (2, 4)
+        or (matrix.ver_a, matrix.ver_b) != (1, 1)
+        or len(matrix.error_terms) != 6 * port_count
+    ):
+        return {}, {}
+
+    rows = [[complex(*point) for point in row] for row in matrix.error_terms]
+    reconstructed = {}
+    reflection = {}
+    invalid = complex(math.nan, math.nan)
+
+    for index, port in enumerate(ports):
+        a, b, c, d, e, f = rows[index::port_count]
+        directivity = [-d_i / a_i if a_i else invalid for a_i, d_i in zip(a, d)]
+        source_match = [c_i / a_i if a_i else invalid for a_i, c_i in zip(a, c)]
+        load_match = [f_i / e_i if e_i else invalid for e_i, f_i in zip(e, f)]
+        # R is the difference between two often nearly equal terms. Use
+        # their magnitudes to estimate the effects of float32 rounding.
+        b_over_a = [b_i / a_i if a_i else invalid for a_i, b_i in zip(a, b)]
+        dm = [d_i * m_i for d_i, m_i in zip(directivity, source_match)]
+        reflection[port] = [
+            (left + right, abs(left) + abs(right)) for left, right in zip(b_over_a, dm)
+        ]
+
+        reconstructed[f"Directivity({port},{port})"] = [(value, abs(value)) for value in directivity]
+        reconstructed[f"SourceMatch({port},{port})"] = [(value, abs(value)) for value in source_match]
+        reconstructed[f"ReflectionTracking({port},{port})"] = reflection[port]
+        for source in ports:
+            if source != port:
+                reconstructed[f"LoadMatch({port},{source})"] = [(value, abs(value)) for value in load_match]
+
+    transmission_ratios = {}
+    for receiver_index, receiver in enumerate(ports):
+        e = rows[4 * port_count + receiver_index]
+        for source_index, source in enumerate(ports):
+            if source == receiver:
+                continue
+            a = rows[source_index]
+            ratio = [a_i / e_i if e_i else invalid for a_i, e_i in zip(a, e)]
+            name = f"TransmissionTracking({receiver},{source})"
+            reconstructed[name] = [
+                (k * value, abs(k) * scale)
+                for k, (value, scale) in zip(ratio, reflection[source])
+            ]
+            transmission_ratios[name] = (source, ratio)
+
+    return reconstructed, transmission_ratios
+
+
 def parse_cal_file(data: bytes) -> ParsedCalFile:
     r = BinaryReader(data, 0)
     LOGGER.debug("Section 1 FileHeader at 0x%X", r.pos)
@@ -731,8 +788,27 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
     LOGGER.debug("Section 7 ErrorTermSet search from 0x%X", sec7_start)
     error_term_set = find_and_parse_section7_error_terms(data, sec7_start)
     named_error_terms = []
-    if not error_term_set and not mapped_groups and len(header.calset_records) == 1:
-        named_error_terms = find_and_parse_one_port_error_terms(data, saved_pos)
+    reconstructed_error_terms = []
+    if not mapped_groups and len(header.calset_records) == 1:
+        if error_term_set is None:
+            named_error_terms = find_and_parse_one_port_error_terms(data, saved_pos)
+        elif (
+            len(set(error_term_set.port_ids)) == len(error_term_set.port_ids) == 4
+            and len(error_term_set.error_terms) == 24
+            and all(point == (1.0, 0.0) for point in error_term_set.error_terms[0])
+        ):
+            # The verified four-port layout stores A for the first port as unity.
+            terms, _ = reconstruct_grouped_matrix_terms(error_term_set)
+            frequencies_hz = tuple(f * 1e9 for f in error_term_set.freqs_ghz)
+            reconstructed_error_terms = [
+                ComplexTrace(
+                    key=name, data_type=2, elem_type=4, dim_count=1,
+                    points=[(value.real, value.imag) for value, _ in trace],
+                    frequencies_hz=frequencies_hz,
+                )
+                for name, trace in sorted(terms.items())
+            ]
+            LOGGER.debug("Reconstructed %d matrix error terms", len(reconstructed_error_terms))
 
     return ParsedCalFile(
         file_size=len(data),
@@ -745,6 +821,7 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
         error_term_set=error_term_set,
         mapped_measurement_groups=mapped_groups,
         named_error_terms=named_error_terms,
+        reconstructed_error_terms=reconstructed_error_terms,
     )
 
 
@@ -875,6 +952,11 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
         ]
     if parsed.error_term_set and parsed.error_term_set.term_names:
         summary["matrix_error_term_names"] = parsed.error_term_set.term_names
+    if parsed.reconstructed_error_terms:
+        summary["counts"]["reconstructed_error_terms"] = len(parsed.reconstructed_error_terms)
+        summary["reconstructed_error_term_names"] = [
+            trace.key for trace in parsed.reconstructed_error_terms
+        ]
     (out_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -897,6 +979,11 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
         ("mapped_measurements.csv", "trace_key", [(g.calset.name, g.traces) for g in groups]),
         ("diq_error_terms.csv", "error_term", [(g.calset.name, g.error_terms) for g in groups]),
         ("named_error_terms.csv", "error_term", [(parsed.header.calset_name, parsed.named_error_terms)]),
+        (
+            "reconstructed_error_terms.csv",
+            "error_term",
+            [(parsed.header.calset_name, parsed.reconstructed_error_terms)],
+        ),
     ):
         if not any(traces for _, traces in traces_by_calset):
             continue
@@ -971,6 +1058,10 @@ def print_summary(parsed: ParsedCalFile) -> None:
         print(f"  Error Terms : {len(ets.error_terms)} terms x {len(ets.freqs_ghz)} pts")
         for index, name in sorted(ets.term_names.items()):
             print(f"  Term {index}: {name}")
+    if parsed.reconstructed_error_terms:
+        print("\n--- Reconstructed Error Terms ---")
+        for trace in parsed.reconstructed_error_terms:
+            print(f"  {trace.key}: {len(trace.points)} pts")
 
 
 def print_hex_range(data: bytes, start: int, end: int) -> None:

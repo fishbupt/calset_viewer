@@ -284,6 +284,71 @@ class CalRecordLayoutTests(unittest.TestCase):
             {"port": 1, "connector": "3.5 mm female", "cal_kit": "Legacy kit"},
         ])
 
+    def test_four_port_matrix_reconstructs_named_terms_and_exports_both_views(self):
+        header = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet_4Port") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+        # Distinct complex coefficients verify block order and both path directions.
+        a = [1, 2j, 3, 4]
+        directivity = [0.125j, 0.25, 0.375, 0.5]
+        source_match = [0.25, 0.5j, 0.75, 1]
+        reflection = [0.5j, 0.25, 0.125, 0.0625]
+        e = [2, 4, 8, 16]
+        load_match = [0.5, 0.25j, 0.125, 0.0625]
+        coefficients = [
+            *a,
+            *(scale * (r - d * m) for scale, r, d, m in zip(a, reflection, directivity, source_match)),
+            *(scale * m for scale, m in zip(a, source_match)),
+            *(-scale * d for scale, d in zip(a, directivity)),
+            *e,
+            *(scale * match for scale, match in zip(e, load_match)),
+        ]
+        matrix = (
+            struct.pack("<11I", 0, 1006, 1, 1, 4, 1, 2, 3, 4, 4, 1)
+            + struct.pack("<dd", 50.0, 0.0) * 4
+            + struct.pack("<I3d", 3, 0.01, 0.02, 0.03)
+            + struct.pack("<5I", 1, 1, 0, 24, 3)
+            + b"".join(struct.pack("<dd", value.real, value.imag) * 3 for value in coefficients)
+        )
+        parsed = parse_cal_file(header + matrix)
+        self.assertFalse(parsed.named_error_terms)
+        self.assertEqual(len(parsed.error_term_set.error_terms), 24)
+        self.assertEqual(parsed.error_term_set.term_names, {})
+        traces = {trace.key: trace for trace in parsed.reconstructed_error_terms}
+        self.assertEqual(len(traces), 36)
+        self.assertFalse(any(key.startswith("CrossTalk") for key in traces))
+        expected = {
+            "Directivity(1,1)": 0.125j,
+            "SourceMatch(2,2)": 0.5j,
+            "ReflectionTracking(2,2)": 0.25,
+            "LoadMatch(2,1)": 0.25j,
+            "LoadMatch(2,4)": 0.25j,
+            "TransmissionTracking(1,2)": 0.25j,
+            "TransmissionTracking(2,1)": 0.125j,
+        }
+        for name, value in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(traces[name].points, [(value.real, value.imag)] * 3)
+                self.assertEqual(traces[name].frequencies_hz, (10e6, 20e6, 30e6))
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            export_results(parsed, output)
+            summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["counts"]["error_terms"], 24)
+            self.assertEqual(summary["counts"]["reconstructed_error_terms"], 36)
+            self.assertEqual(set(summary["reconstructed_error_term_names"]), set(traces))
+            with (output / "reconstructed_error_terms.csv").open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+                self.assertEqual(len(rows), 36 * 3)
+                self.assertEqual([float(row["freq_hz"]) for row in rows[:3]], [10e6, 20e6, 30e6])
+                self.assertEqual(rows[0]["error_term"], "Directivity(1,1)")
+            with (output / "error_terms.csv").open(newline="", encoding="utf-8") as f:
+                self.assertIn("term23_im", next(csv.reader(f)))
+
     def test_error_terms_with_z0_prefix(self):
         data = self.error_terms(struct.pack("<I", 1), struct.pack("<dd", 50.0, 0.0))
 

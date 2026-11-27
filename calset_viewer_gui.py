@@ -543,11 +543,13 @@ class CalSetViewerWindow(QMainWindow):
             len(group.error_terms) for group in parsed.mapped_measurement_groups
         )
         LOGGER.info(
-            "导入完成 | %s | 原始迹线 %d | 映射迹线 %d | 误差项 %d",
+            "导入完成 | %s | 原始迹线 %d | 映射迹线 %d | 原始矩阵系数 %d | 具名误差项 %d | 重建误差项 %d",
             path.name,
             len(parsed.raw_measurements),
             len(parsed.mapped_measurements),
-            matrix_term_count + named_term_count,
+            matrix_term_count,
+            named_term_count,
+            len(parsed.reconstructed_error_terms),
         )
 
     def _update_status_bar(self, path: Path, parsed: ParsedCalFile) -> None:
@@ -630,6 +632,15 @@ class CalSetViewerWindow(QMainWindow):
             named_terms.setExpanded(True)
 
         # 6. Section 7: Error Terms
+        reconstructed_node = None
+        if p.reconstructed_error_terms:
+            label = f"误差项（重建） ({len(p.reconstructed_error_terms)})"
+            reconstructed_node = QTreeWidgetItem(self.tree, [label])
+            self._add_trace_nodes(
+                reconstructed_node, p.reconstructed_error_terms, source="reconstructed_error"
+            )
+            reconstructed_node.setExpanded(True)
+
         if p.error_term_set:
             ets = p.error_term_set
             n_terms = len(ets.error_terms)
@@ -647,8 +658,10 @@ class CalSetViewerWindow(QMainWindow):
                     Qt.ItemDataRole.UserRole,
                     {"kind": "error_term", "index": t_idx},
                 )
-            sec7.setExpanded(True)
-            if sec7.childCount() > 1:
+            sec7.setExpanded(reconstructed_node is None)
+            if reconstructed_node is not None:
+                self.tree.setCurrentItem(reconstructed_node.child(0))
+            elif sec7.childCount() > 1:
                 self.tree.setCurrentItem(sec7.child(1))
         elif p.named_error_terms:
             named_terms = QTreeWidgetItem(self.tree, [f"误差项 ({len(p.named_error_terms)})"])
@@ -813,6 +826,7 @@ class CalSetViewerWindow(QMainWindow):
                 "mapped": "Section 4 | 映射标准件测量",
                 "diq_error": "DIQ | 误差项",
                 "named_error": "单端口 | 误差项",
+                "reconstructed_error": "误差项（重建）",
             }[source]
             group_index = meta.get("group_index")
             group_name = ""
@@ -822,6 +836,9 @@ class CalSetViewerWindow(QMainWindow):
                 group_name = group.calset.name
             elif source == "named_error":
                 traces = p.named_error_terms
+                group_name = p.header.calset_name
+            elif source == "reconstructed_error":
+                traces = p.reconstructed_error_terms
                 group_name = p.header.calset_name
             else:
                 traces = p.raw_measurements if source == "raw" else p.mapped_measurements
