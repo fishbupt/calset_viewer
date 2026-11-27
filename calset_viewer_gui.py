@@ -34,10 +34,14 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -55,6 +59,17 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+)
+
+from calset_operations import (
+    DERIVED_FORMAT,
+    compare_terms,
+    deembed_calset,
+    fixture_calibration_ports,
+    named_calset_groups,
+    read_calset_document,
+    read_fixture,
+    write_calset_document,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +91,7 @@ FMT_DB_PHASE = "Mag(dB) / Phase(°)"
 FMT_RE_IM = "Re / Im"
 FMT_LIN_PHASE = "Mag(Lin) / Phase(°)"
 LOGGER = logging.getLogger("calset_viewer")
+CALSET_FILTER = "校准文件 (*.cal *.calset.json);;Keysight CalSet (*.cal);;Viewer 去嵌结果 (*.calset.json)"
 
 
 class LogPanelHandler(logging.Handler):
@@ -160,6 +176,8 @@ class TracePlotWidget(QWidget):
         x_label: str,
         points: List[Tuple[float, float]],
         display_format: str,
+        *,
+        reference_points: Optional[List[Tuple[float, float]]] = None,
     ) -> None:
         if not HAS_MATPLOTLIB or self.figure is None or self.canvas is None:
             return
@@ -186,6 +204,10 @@ class TracePlotWidget(QWidget):
             y1_label, y2_label = "Mag (dB)", "Phase (deg)"
             l1, l2 = "Mag", "Phase"
 
+        if reference_points is not None:
+            l1 = l2 = "Current"
+            ax1.plot(x_vals, [point[0] for point in reference_points], "--", color="#65758b", label="Reference")
+            ax2.plot(x_vals, [point[1] for point in reference_points], "--", color="#65758b", label="Reference")
         ax1.plot(x_vals, y1, color="#1f77b4", linewidth=1.4, label=l1)
         ax1.set_ylabel(y1_label, fontsize=9)
         ax1.grid(True, linestyle="--", alpha=0.45)
@@ -206,6 +228,153 @@ class TracePlotWidget(QWidget):
             left=0.10, right=0.97, top=0.95, bottom=0.12, hspace=0.28
         )
         self.canvas.draw_idle()
+
+
+class FixtureDialog(QDialog):
+    def __init__(self, parent: QWidget, ports: list[int], directory: Path) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("夹具去嵌 CalSet")
+        self.resize(680, 190)
+        self.directory = directory
+        self.inputs = {}
+        layout = QFormLayout(self)
+        layout.addRow(QLabel("为一个或两个端口选择 .s2p。留空的端口按理想直通处理。"))
+        for port in ports:
+            filename = QLineEdit(self)
+            filename.setPlaceholderText("选择夹具文件")
+            browse = QPushButton("浏览…", self)
+            browse.clicked.connect(lambda checked=False, field=filename: self.browse(field))
+            direction = QComboBox(self)
+            direction.addItems(["文件端口 1 朝 VNA", "文件端口 2 朝 VNA"])
+            row = QHBoxLayout()
+            row.addWidget(filename, 1)
+            row.addWidget(browse)
+            row.addWidget(direction)
+            layout.addRow(f"VNA 端口 {port}", row)
+            self.inputs[port] = (filename, direction)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("计算并保存")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def browse(self, field: QLineEdit) -> None:
+        name, _ = QFileDialog.getOpenFileName(
+            self, "选择 S2P 夹具", str(self.directory), "Touchstone (*.s2p);;所有文件 (*)"
+        )
+        if name:
+            field.setText(name)
+            self.directory = Path(name).parent
+
+    def accept(self) -> None:
+        if not any(field.text().strip() for field, _ in self.inputs.values()):
+            QMessageBox.warning(self, "缺少夹具", "请至少选择一个端口的 .s2p 文件。")
+            return
+        super().accept()
+
+
+class CalSetComparisonDialog(QDialog):
+    HEADERS = ["误差项", "比较状态", "比较点数", "最大 |Δ|", "RMS |Δ|", "峰值位置"]
+
+    def __init__(
+        self, parent: QWidget, left_name: str, right_name: str,
+        left: List[ComplexTrace], right: List[ComplexTrace],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("比较 CalSet")
+        self.resize(960, 720)
+        self.rows = compare_terms(left, right)
+        self.left = {trace.key.casefold(): trace for trace in left}
+        self.right = {trace.key.casefold(): trace for trace in right}
+        self.left_name = left_name
+        self.right_name = right_name
+        layout = QVBoxLayout(self)
+        description = QLabel(f"当前  {left_name}\n参考  {right_name}\nΔ = 当前 − 参考", self)
+        description.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(description)
+        self.table = QTableWidget(len(self.rows), len(self.HEADERS), self)
+        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        layout.addWidget(self.table, 1)
+        self.info = QLabel(self)
+        self.info.setTextFormat(Qt.TextFormat.PlainText)
+        self.plot = TracePlotWidget(self)
+        self.view = QComboBox(self)
+        self.view.addItems(["实部 / 虚部叠加", "复数差值 Δ"])
+        view_row = QHBoxLayout()
+        view_row.addWidget(self.info, 1)
+        view_row.addWidget(self.view)
+        layout.addLayout(view_row)
+        layout.addWidget(self.plot, 2)
+        actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        export = actions.addButton("导出比较 CSV", QDialogButtonBox.ButtonRole.ActionRole)
+        export.clicked.connect(self.export_csv)
+        actions.rejected.connect(self.reject)
+        layout.addWidget(actions)
+
+        self.report = []
+        for i, row in enumerate(self.rows):
+            peak = ""
+            if row.peak_frequency_hz is not None:
+                peak = f"{row.peak_frequency_hz:.12g} Hz"
+            elif row.peak_index is not None:
+                peak = f"点索引 {row.peak_index}"
+            values = [
+                row.name, row.status, str(len(row.residuals)),
+                "" if row.max_error is None else f"{row.max_error:.12g}",
+                "" if row.rms_error is None else f"{row.rms_error:.12g}", peak,
+            ]
+            self.report.append(values)
+            for col, value in enumerate(values):
+                self.table.setItem(i, col, QTableWidgetItem(value))
+        self.table.currentCellChanged.connect(self.show_trace)
+        self.view.currentIndexChanged.connect(self.show_trace)
+        if self.rows:
+            row_index = next((i for i, row in enumerate(self.rows) if row.residuals), 0)
+            self.table.setCurrentCell(row_index, 0)
+            self.table.selectRow(row_index)
+
+    def show_trace(self) -> None:
+        index = self.table.currentRow()
+        if index < 0:
+            return
+        row = self.rows[index]
+        self.info.setText(f"{row.name} | {row.status}")
+        self.plot.setVisible(bool(row.residuals))
+        if not row.residuals:
+            return
+        axis = row.frequencies_hz
+        if axis is not None and all(a < b for a, b in zip(axis, axis[1:])):
+            x_vals, x_label = [hz / 1e9 for hz in axis], "Frequency (GHz)"
+        else:
+            x_vals, x_label = list(range(len(row.residuals))), "Point Index"
+        if self.view.currentIndex() == 0:
+            key = row.name.casefold()
+            self.plot.plot_complex_series(
+                row.name, x_vals, x_label, self.left[key].points, FMT_RE_IM,
+                reference_points=self.right[key].points,
+            )
+        else:
+            self.plot.plot_complex_series(row.name, x_vals, x_label, row.residuals, FMT_RE_IM)
+
+    def export_csv(self) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "导出比较结果", "calset_comparison.csv", "CSV (*.csv)"
+        )
+        if filename:
+            try:
+                with open(filename, "w", newline="", encoding="utf-8-sig") as output:
+                    writer = csv.writer(output)
+                    writer.writerow(["当前 CalSet", "参考 CalSet", *self.HEADERS])
+                    writer.writerows([self.left_name, self.right_name, *row] for row in self.report)
+            except OSError as exc:
+                QMessageBox.critical(self, "导出失败", str(exc))
 
 
 class CalSetViewerWindow(QMainWindow):
@@ -231,7 +400,7 @@ class CalSetViewerWindow(QMainWindow):
 
     def _build_menu_and_toolbar(self) -> None:
         # Actions
-        self.act_open = QAction("打开 .cal", self)
+        self.act_open = QAction("打开 CalSet", self)
         self.act_open.setShortcut(QKeySequence.StandardKey.Open)
         self.act_open.triggered.connect(self.on_open_dialog)
 
@@ -261,6 +430,11 @@ class CalSetViewerWindow(QMainWindow):
         self.act_collapse_all = QAction("折叠全部目录", self)
         self.act_collapse_all.triggered.connect(lambda: self.tree.collapseAll())
 
+        self.act_deembed = QAction("夹具去嵌 CalSet…", self)
+        self.act_deembed.triggered.connect(self.on_deembed_calset)
+        self.act_compare = QAction("比较 CalSet…", self)
+        self.act_compare.triggered.connect(self.on_compare_calsets)
+
         self.act_about = QAction("关于", self)
         self.act_about.triggered.connect(self.on_about)
 
@@ -282,6 +456,10 @@ class CalSetViewerWindow(QMainWindow):
         m_view.addAction(self.act_expand_all)
         m_view.addAction(self.act_collapse_all)
         self.view_menu = m_view
+
+        m_tools = mb.addMenu("工具(&T)")
+        m_tools.addAction(self.act_deembed)
+        m_tools.addAction(self.act_compare)
 
         m_help = mb.addMenu("帮助(&H)")
         m_help.addAction(self.act_about)
@@ -479,7 +657,7 @@ class CalSetViewerWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".cal"):
+                if url.toLocalFile().lower().endswith((".cal", ".calset.json")):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -487,7 +665,7 @@ class CalSetViewerWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
-            if path.suffix.lower() == ".cal":
+            if path.name.lower().endswith((".cal", ".calset.json")):
                 self.load_cal_file(path)
                 return
 
@@ -496,9 +674,9 @@ class CalSetViewerWindow(QMainWindow):
     def on_open_dialog(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "打开 Keysight PNA 校准文件",
+            "打开 CalSet",
             str(self.current_path.parent) if self.current_path else "",
-            "Keysight Cal Files (*.cal);;All Files (*)",
+            CALSET_FILTER,
         )
         if file_path:
             self.load_cal_file(Path(file_path))
@@ -509,22 +687,16 @@ class CalSetViewerWindow(QMainWindow):
 
     def load_cal_file(self, path: Path) -> None:
         LOGGER.info("开始导入 %s", path.name)
-        stage = "加载解析器"
+        stage = "读取文件"
         try:
-            from parse_pna_cal import load_matrix_error_term_names, parse_cal_file
-
-            stage = "读取文件"
             raw = path.read_bytes()
             LOGGER.info("已读取 %s | %d 字节", path.name, len(raw))
             stage = "解析校准数据"
-            parsed = parse_cal_file(raw)
-            load_matrix_error_term_names(parsed, path, raw)
+            parsed = read_calset_document(path, raw)
         except Exception as exc:
             LOGGER.exception("导入失败 | %s | 阶段：%s", path.name, stage)
             self.log_dock.show()
             message = str(exc)
-            if isinstance(exc, ModuleNotFoundError) and exc.name == "parse_pna_cal":
-                message = "请将 parse_pna_cal.py 放在 calset_viewer_gui.py 同目录后重试。"
             QMessageBox.critical(
                 self,
                 "导入失败",
@@ -551,6 +723,96 @@ class CalSetViewerWindow(QMainWindow):
             named_term_count,
             len(parsed.reconstructed_error_terms),
         )
+
+    def on_deembed_calset(self) -> None:
+        if self.parsed is None or self.current_path is None:
+            QMessageBox.information(self, "夹具去嵌", "请先打开常规两端口 CalSet。")
+            return
+        try:
+            ports = fixture_calibration_ports(self.parsed)
+        except ValueError as exc:
+            QMessageBox.information(self, "夹具去嵌", str(exc))
+            return
+
+        dialog = FixtureDialog(self, [port for port, _ in ports], self.current_path.parent)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            fixtures = {
+                port: read_fixture(Path(field.text().strip()), direction.currentIndex() == 1)
+                for port, (field, direction) in dialog.inputs.items() if field.text().strip()
+            }
+            result = deembed_calset(self.parsed, self.current_path, fixtures)
+            source_name = self.current_path.name.removesuffix(".calset.json")
+            if self.current_path.suffix.lower() == ".cal":
+                source_name = self.current_path.stem
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "保存去嵌后的 CalSet",
+                str(self.current_path.with_name(f"{source_name}_deembed.calset.json")),
+                "CalSet Viewer (*.calset.json)",
+            )
+            if not filename:
+                return
+            path = Path(filename)
+            if not path.name.lower().endswith(".calset.json"):
+                path = path.with_name(f"{path.name}.calset.json")
+                if path.exists():
+                    answer = QMessageBox.question(
+                        self, "覆盖去嵌结果", f"已存在 {path.name}，是否替换？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer != QMessageBox.StandardButton.Yes:
+                        return
+            if path.resolve() == self.current_path.resolve():
+                raise ValueError("请选择与当前 CalSet 不同的文件名。")
+            write_calset_document(path, result)
+        except (OSError, ValueError, ArithmeticError) as exc:
+            LOGGER.exception("夹具去嵌失败")
+            QMessageBox.critical(self, "夹具去嵌失败", str(exc))
+            return
+        self.load_cal_file(path)
+        self.status.showMessage(f"已保存去嵌 CalSet {path.name}", 5000)
+
+    def on_compare_calsets(self) -> None:
+        if self.parsed is None or self.current_path is None:
+            QMessageBox.information(self, "比较 CalSet", "请先打开待比较的 CalSet。")
+            return
+        current = named_calset_groups(self.parsed)
+        if not current:
+            QMessageBox.information(self, "比较 CalSet", "当前文件缺少具名误差项。")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "打开参考 CalSet", str(self.current_path.parent), CALSET_FILTER
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            reference = named_calset_groups(read_calset_document(path))
+        except (OSError, ValueError, EOFError) as exc:
+            LOGGER.exception("读取参考 CalSet 失败 | %s", path.name)
+            QMessageBox.critical(self, "读取参考 CalSet 失败", str(exc))
+            return
+        if not reference:
+            QMessageBox.information(self, "比较 CalSet", "参考文件缺少具名误差项。")
+            return
+
+        selections = []
+        for filepath, groups in ((self.current_path, current), (path, reference)):
+            index = 0
+            if len(groups) > 1:
+                options = [f"{i + 1}. {name}" for i, (name, _) in enumerate(groups)]
+                option, accepted = QInputDialog.getItem(
+                    self, "选择 CalSet", filepath.name, options, editable=False
+                )
+                if not accepted:
+                    return
+                index = options.index(option)
+            name, traces = groups[index]
+            selections.append((f"{filepath.name} | {name}", traces))
+        (left_name, left), (right_name, right) = selections
+        CalSetComparisonDialog(self, left_name, right_name, left, right).exec()
 
     def _update_status_bar(self, path: Path, parsed: ParsedCalFile) -> None:
         parts = [path.name, f"{parsed.file_size:,} B"]
@@ -634,7 +896,8 @@ class CalSetViewerWindow(QMainWindow):
         # 6. Section 7: Error Terms
         reconstructed_node = None
         if p.reconstructed_error_terms:
-            label = f"误差项（重建） ({len(p.reconstructed_error_terms)})"
+            group_label = "误差项（去嵌）" if p.header.magic == DERIVED_FORMAT else "误差项（重建）"
+            label = f"{group_label} ({len(p.reconstructed_error_terms)})"
             reconstructed_node = QTreeWidgetItem(self.tree, [label])
             self._add_trace_nodes(
                 reconstructed_node, p.reconstructed_error_terms, source="reconstructed_error"
@@ -663,6 +926,8 @@ class CalSetViewerWindow(QMainWindow):
                 self.tree.setCurrentItem(reconstructed_node.child(0))
             elif sec7.childCount() > 1:
                 self.tree.setCurrentItem(sec7.child(1))
+        elif reconstructed_node is not None:
+            self.tree.setCurrentItem(reconstructed_node.child(0))
         elif p.named_error_terms:
             named_terms = QTreeWidgetItem(self.tree, [f"误差项 ({len(p.named_error_terms)})"])
             self._add_trace_nodes(named_terms, p.named_error_terms, source="named_error")
@@ -826,7 +1091,7 @@ class CalSetViewerWindow(QMainWindow):
                 "mapped": "Section 4 | 映射标准件测量",
                 "diq_error": "DIQ | 误差项",
                 "named_error": "单端口 | 误差项",
-                "reconstructed_error": "误差项（重建）",
+                "reconstructed_error": "误差项（去嵌）" if p.header.magic == DERIVED_FORMAT else "误差项（重建）",
             }[source]
             group_index = meta.get("group_index")
             group_name = ""
@@ -1023,7 +1288,7 @@ class CalSetViewerWindow(QMainWindow):
 
     def on_export_current(self) -> None:
         if self.parsed is None:
-            QMessageBox.information(self, "提示", "请先打开一个 .cal 文件。")
+            QMessageBox.information(self, "提示", "请先打开一个 CalSet。")
             return
         if self.active_series_payload is None:
             QMessageBox.information(
@@ -1067,7 +1332,7 @@ class CalSetViewerWindow(QMainWindow):
 
     def on_export_all(self) -> None:
         if self.parsed is None:
-            QMessageBox.information(self, "提示", "请先打开一个 .cal 文件。")
+            QMessageBox.information(self, "提示", "请先打开一个 CalSet。")
             return
         out_dir = QFileDialog.getExistingDirectory(self, "选择全量导出目录")
         if not out_dir:
