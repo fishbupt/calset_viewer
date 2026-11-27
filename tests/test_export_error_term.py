@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from uuid import UUID
 
+import test_parse_pna_cal
 from parse_pna_cal import ErrorTermSet, encode_cstringw, match_matrix_error_term_names
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "export_error_term.py"
@@ -19,6 +20,56 @@ with patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
 
 
 class VerifyCalTests(unittest.TestCase):
+    def test_one_port_cli_compares_named_traces_with_and_without_frequency_axis(self):
+        calset = "Local1Port"
+        keys = ["Directivity(1,1)", "ReflectionTracking(1,1)", "SourceMatch(1,1)"]
+        frequencies = (10e6, 20e6, 30e6)
+        make_trace = test_parse_pna_cal.CalRecordLayoutTests.complex_trace
+        data = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw(calset) + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHIII", 0, 0, 0x3C, 2, 1, 15, 0, 0, 3)
+            + make_trace(keys[0], 0.1, frequencies)
+            + make_trace(keys[1], 1.0, frequencies, save_axis=False)
+            + make_trace(keys[2], 0.2, frequencies, save_axis=False)
+        )
+        instrument = Mock()
+        manager = Mock()
+        manager.open_resource.return_value = instrument
+        visa = SimpleNamespace(ResourceManager=Mock(return_value=manager))
+        instrument.query.side_effect = {
+            "*IDN?": "Keysight Technologies,N5245B,0,A.20.82.01",
+            ':CSET:EXIS? "{00000000-0000-0000-0000-000000000001}"': "1",
+            f':CSET:ETER:CAT? "{calset}"': '"' + ",".join(reversed(keys)) + '"',
+            ":FORM:DATA?": "ASC",
+        }.__getitem__
+        instrument.read_raw.side_effect = [
+            b"10000000,20000000,30000000", b"0.1,0,0.1,0,0.1,0",
+            b"1,0,1,0,1,0.0001", b"0.2,0,0.2,0",
+        ]
+        output = StringIO()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "local.cal"
+            path.write_bytes(data)
+            args = [str(SCRIPT), "--verify-cal", str(path)]
+            with patch.dict(sys.modules, {"pyvisa": visa}), patch.object(sys, "argv", args):
+                with redirect_stdout(output):
+                    main()
+            self.assertEqual(list(Path(folder).iterdir()), [path])
+
+        report = output.getvalue()
+        self.assertIn("Directivity(1,1): MATCH | 3 points | frequency checked", report)
+        self.assertIn("ReflectionTracking(1,1): DIFFER (first point 3) | 3 points | point order only", report)
+        self.assertIn("SourceMatch(1,1): NOT VERIFIED (trace point count=2, expected=3)", report)
+        self.assertIn("Matched: 1/3 named error terms", report)
+        self.assertEqual(instrument.write.call_args_list, [
+            call(f':CSET:ETER:X:VAL? "{calset}","{keys[0]}"'),
+            *(call(f':CSET:ETER:DATA? "{calset}","{key}"') for key in keys),
+        ])
+        instrument.close.assert_called_once()
+        manager.close.assert_called_once()
+
     def test_report_matches_complete_traces_only_after_frequency_validation(self):
         freqs_hz = (10e6, 20e6, 30e6)
         freqs_ghz = tuple(frequency / 1e9 for frequency in freqs_hz)

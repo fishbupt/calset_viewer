@@ -43,6 +43,14 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 
 在已识别的单端口格式中，左侧 **误差项** 节点按文件内的名称显示 `Directivity`、`ReflectionTracking` 和 `SourceMatch`。全量导出生成 `named_error_terms.csv`。记录缺少可识别的频率轴时，曲线和数据表保留点索引，CSV 的 `freq_hz` 留空。
 
+在 VNA Simulator 中加载同一 CalSet 后，可以按名称验证这三个误差项。
+
+```powershell
+uv run --locked --with pyvisa python .\tools\export_error_term.py --verify-cal "$env:USERPROFILE\Desktop\CalSet\calset_1port.cal"
+```
+
+`[Named error term verification]` 报告每项的复数值匹配结果和最大残差。含频率轴的迹线先核对频率。对于文件未保存可识别频率轴的迹线，报告 `point order only`，表示按文件中的点序比对复数值。
+
 如果单端口文件的 **映射标准件测量** 仍为空，可以输出原始测量键名，以及其后的复数记录候选：
 
 ```sh

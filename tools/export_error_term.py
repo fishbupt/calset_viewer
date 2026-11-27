@@ -1,4 +1,4 @@
-"""Export CalSet error terms or verify a local .cal matrix against a PNA or VNA Simulator."""
+"""Export CalSet error terms or verify a local .cal against a PNA or VNA Simulator."""
 
 import argparse
 import hashlib
@@ -81,6 +81,24 @@ def read_error_term(instrument, calset, term):
     return read_numeric_response(instrument, query, parse_error_term_response)
 
 
+def read_verified_trace(instrument, calset, name, point_count, expected_hz):
+    if expected_hz is not None:
+        query = f":CSET:ETER:X:VAL? {quote_scpi_name(calset)},{quote_scpi_name(name)}"
+        actual_hz = read_numeric_response(instrument, query, parse_scpi_ascii_values)
+        if len(actual_hz) != len(expected_hz):
+            raise ValueError(f"frequency point count: .cal={len(expected_hz)}, instrument={len(actual_hz)}")
+        for point, (expected, actual) in enumerate(zip(expected_hz, actual_hz), start=1):
+            if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.5):
+                raise ValueError(
+                    f"frequency mismatch at point {point}: .cal={expected:.12g} Hz, "
+                    f"instrument={actual:.12g} Hz"
+                )
+    values = read_error_term(instrument, calset, name)
+    if len(values) != 2 * point_count:
+        raise ValueError(f"trace point count={len(values) // 2}, expected={point_count}")
+    return list(zip(values[::2], values[1::2]))
+
+
 def read_verified_references(instrument, calset, names, matrix):
     calset_arg = quote_scpi_name(calset)
     port_response = instrument.query(f":CSET:PROP:PORT:CAT? {calset_arg}")
@@ -92,25 +110,56 @@ def read_verified_references(instrument, calset, names, matrix):
     references = {}
     skipped = {}
     for name in names:
-        query = f":CSET:ETER:X:VAL? {calset_arg},{quote_scpi_name(name)}"
         try:
-            actual_hz = read_numeric_response(instrument, query, parse_scpi_ascii_values)
-            if len(actual_hz) != len(expected_hz):
-                raise ValueError(f"frequency point count: .cal={len(expected_hz)}, instrument={len(actual_hz)}")
-            for point, (expected, actual) in enumerate(zip(expected_hz, actual_hz), start=1):
-                if not math.isclose(expected, actual, rel_tol=0.0, abs_tol=0.5):
-                    raise ValueError(
-                        f"frequency mismatch at point {point}: .cal={expected:.12g} Hz, "
-                        f"instrument={actual:.12g} Hz"
-                    )
-            values = read_error_term(instrument, calset, name)
-            if len(values) != 2 * len(actual_hz):
-                raise ValueError(f"trace point count={len(values) // 2}, frequency point count={len(actual_hz)}")
+            references[name] = read_verified_trace(
+                instrument, calset, name, len(expected_hz), expected_hz,
+            )
         except ValueError as exc:
             skipped[name] = str(exc)
-            continue
-        references[name] = list(zip(values[::2], values[1::2]))
     return references, skipped
+
+
+def verify_named_terms(instrument, calset, names, traces):
+    catalog = {name.casefold(): name for name in names}
+    print(f"CalSet: {calset}")
+    print("\n[Named error term verification]")
+    matched = 0
+    for trace in traces:
+        name = catalog.get(trace.key.casefold())
+        if name is None:
+            print(f"  {trace.key}: NOT VERIFIED (missing from instrument catalog)")
+            continue
+        try:
+            reference = read_verified_trace(
+                instrument, calset, name, len(trace.points), trace.frequencies_hz,
+            )
+        except ValueError as exc:
+            print(f"  {trace.key}: NOT VERIFIED ({exc})")
+            continue
+        first_mismatch = next(
+            (
+                point
+                for point, (local, remote) in enumerate(zip(trace.points, reference), start=1)
+                if not all(
+                    math.isclose(actual, expected, rel_tol=5e-7, abs_tol=1e-15)
+                    for actual, expected in zip(local, remote)
+                )
+            ),
+            None,
+        )
+        max_residual = max(
+            abs(complex(*local) - complex(*remote))
+            for local, remote in zip(trace.points, reference)
+        )
+        axis = "frequency checked" if trace.frequencies_hz is not None else "point order only"
+        status = "MATCH" if first_mismatch is None else f"DIFFER (first point {first_mismatch})"
+        print(
+            f"  {trace.key}: {status} | {len(reference)} points "
+            f"| {axis} | max residual={max_residual:.6g}"
+        )
+        if first_mismatch is None:
+            matched += 1
+    print(f"\nMatched: {matched}/{len(traces)} named error terms")
 
 
 def print_verification_report(calset, matrix, labels, candidates, skipped):
@@ -216,7 +265,7 @@ def main():
     )
     mode.add_argument(
         "--verify-cal", type=Path, metavar="CAL",
-        help="Compare CalSet frequencies and error terms with a local .cal and print the row mapping",
+        help="Compare a local .cal with the instrument by term name or by matrix row",
     )
     args = parser.parse_args()
     cal_path = args.verify_cal or args.label_cal
@@ -241,8 +290,10 @@ def main():
             cal_data = cal_path.read_bytes()
             parsed = parse_cal_file(cal_data)
             matrix = parsed.error_term_set
-            if matrix is None or not matrix.error_terms:
-                raise ValueError("The .cal does not contain a recognized error term matrix")
+            named_traces = parsed.named_error_terms if args.verify_cal else []
+            if not named_traces and (matrix is None or not matrix.error_terms):
+                expected = "named error terms or an error term matrix" if args.verify_cal else "an error term matrix"
+                raise ValueError(f"The .cal does not contain recognized {expected}")
 
         with closing(pyvisa.ResourceManager(args.visa_library or "")) as manager:
             with closing(manager.open_resource(args.resource)) as instrument:
@@ -284,6 +335,9 @@ def main():
                             raise ValueError(f"No error terms returned for {calset!r}")
                         names = list(dict.fromkeys(names))
                         if args.verify_cal:
+                            if named_traces:
+                                verify_named_terms(instrument, calset, names, named_traces)
+                                return
                             references, skipped = read_verified_references(instrument, calset, names, matrix)
                         else:
                             references = {}
