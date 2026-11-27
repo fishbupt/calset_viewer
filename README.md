@@ -59,6 +59,16 @@ uv run --locked python tools/locate_error_term.py calset_diq_ch01.cal term.txt
 
 工具报告符合整条参考曲线的文件偏移和数值布局，供验证误差项区段。
 
+## 误差项识别诊断
+
+如果 `.cal` 能打开，但左侧没有 **误差项矩阵** 或 **误差项**，可以在仓库目录执行：
+
+```sh
+uv run --locked python parse_pna_cal.py your_calset.cal --inspect-error-terms
+```
+
+命令报告普通导入得到的误差项数量、候选区段偏移及校验结果，以及匹配到的具名误差项记录。可复制输出用于定位文件布局。
+
 ## 导入日志
 
 导入失败时，窗口底部会自动展开 **导入日志**。点击 **复制日志**，即可粘贴本次运行的诊断记录。也可通过 **查看 → 导入日志** 手动打开面板。

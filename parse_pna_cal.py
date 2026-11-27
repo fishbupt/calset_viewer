@@ -15,6 +15,7 @@ import csv
 import datetime as dt
 import json
 import logging
+import re
 import struct
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -825,10 +826,91 @@ def print_summary(parsed: ParsedCalFile) -> None:
         print(f"  Error Terms : {len(ets.error_terms)} terms x {len(ets.freqs_ghz)} pts")
 
 
+def inspect_error_terms(data: bytes) -> None:
+    """Report possible error-term layouts, without exporting trace values."""
+    print(f"File size: {len(data)} bytes")
+    try:
+        parsed = parse_cal_file(data)
+    except (ValueError, EOFError, struct.error) as exc:
+        print(f"Normal import: {type(exc).__name__}: {exc}")
+    else:
+        matrix_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
+        named_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
+        print(f"Normal import: {matrix_count} matrix terms, {named_count} named terms")
+
+    print("\n[Error term matrix candidates]")
+    marker = struct.pack("<II", 0, 1006)
+    offsets = []
+    offset = data.find(marker)
+    while offset >= 0:
+        offsets.append(offset)
+        offset = data.find(marker, offset + len(marker))
+    print(f"Found: {len(offsets)}")
+    for offset in offsets[:8]:
+        print(f"  0x{offset:X}: {data[offset:offset + 40].hex(' ').upper()}")
+        if offset + 16 <= len(data):
+            ver_a, ver_b = struct.unpack_from("<II", data, offset + 8)
+            print(f"    Version words: {ver_a}, {ver_b}")
+        try:
+            candidate = parse_section7_error_terms_at(data, offset)
+        except (ValueError, EOFError, struct.error) as exc:
+            print(f"    Layout check: {type(exc).__name__}: {exc}")
+        else:
+            print(
+                f"    Layout check: ports={candidate.port_ids}, "
+                f"terms={len(candidate.error_terms)}, points={len(candidate.freqs_ghz)}"
+            )
+    if len(offsets) > 8:
+        print(f"  Additional candidates omitted: {len(offsets) - 8}")
+    if not offsets:
+        magic = struct.pack("<I", 1006)
+        print("  Unvalidated magic-only matches:")
+        offset = data.find(magic)
+        for _ in range(4):
+            if offset < 0:
+                break
+            nearby = data[max(0, offset - 8):offset + 32].hex(" ").upper()
+            print(f"    magic at 0x{offset:X}: {nearby}")
+            offset = data.find(magic, offset + len(magic))
+
+    print("\n[Named error term keys]")
+    names = ("Directivity", "SourceMatch", "ReflectionTracking",
+             "LoadMatch", "TransmissionTracking", "CrossTalk", "Isolation")
+    pattern = re.compile(
+        re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:"
+        + b"|".join(re.escape((name + "(").encode("utf-16le")) for name in names)
+        + rb")"
+    )
+    count = 0
+    for match in pattern.finditer(data):
+        offset = match.start()
+        reader = BinaryReader(data, offset)
+        try:
+            key = reader.read_cstringw()
+        except (ValueError, EOFError):
+            continue
+        if re.fullmatch(r"[A-Za-z]+\(\d+(?:,\s*\d+)?\)", key) is None:
+            continue
+        count += 1
+        if count <= 8:
+            prefix = data[max(0, offset - 4):offset].hex(" ").upper()
+            record_header = data[reader.pos:reader.pos + 24].hex(" ").upper()
+            print(f"  0x{offset:X}: {key} | before: {prefix} | header: {record_header}")
+    print(f"Found: {count}")
+    if count > 8:
+        print(f"  Additional keys omitted: {count - 8}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Parse Keysight PNA/PNA-X *.cal files")
     ap.add_argument("cal_file", type=Path, help="Path to the .cal file")
-    ap.add_argument(
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--inspect-error-terms",
+        action="store_true",
+        help="Report candidate error-term layouts for a .cal file",
+    )
+    mode.add_argument(
         "--export-dir",
         type=Path,
         default=None,
@@ -837,6 +919,10 @@ def main() -> None:
     args = ap.parse_args()
 
     data = args.cal_file.read_bytes()
+    if args.inspect_error_terms:
+        inspect_error_terms(data)
+        return
+
     parsed = parse_cal_file(data)
     print_summary(parsed)
     if args.export_dir:
