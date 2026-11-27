@@ -359,10 +359,10 @@ def parse_section3_stimulus_header(r: BinaryReader) -> StimulusHeader:
 
 
 MAPPED_KEY = re.compile(
-    r"(?:S[ABC]_\d+|Thru_(?:[0-9_]+|RefRatio))\([1-9]\d*,[1-9]\d*\)"
+    r"(?:S[ABC](?:_\d+)?|Thru_(?:[0-9_]+|RefRatio))\([1-9]\d*,[1-9]\d*\)"
 )
 MAPPED_KEY_PREFIX = re.compile(
-    re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:S\x00[ABC]\x00_\x00|"
+    re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:S\x00[ABC]\x00[(_]\x00|"
     + re.escape("Thru_".encode("utf-16le"))
     + rb")"
 )

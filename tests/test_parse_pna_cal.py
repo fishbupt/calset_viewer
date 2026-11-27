@@ -204,15 +204,20 @@ class CalRecordLayoutTests(unittest.TestCase):
         record_offset = first_offset + len(encode_cstringw(keys[0]))
         self.assertEqual(struct.unpack_from("<I", data, record_offset + 2)[0], 0x9C68)
         self.assertEqual(struct.unpack_from("<I", data, record_offset + 16)[0], 0x9C54)
-        data += struct.pack("<I", 1)
-        data += self.complex_trace("SB_1(1,1)", 0.25, points, save_axis=False)
+        mapped_keys = ["SA(1,1)", "SB(1,1)", "SC(1,1)"]
+        data += struct.pack("<I", len(mapped_keys))
+        for index, key in enumerate(mapped_keys, start=1):
+            data += self.complex_trace(key, index / 4, points, save_axis=False)
         data += struct.pack("<7I", 0, 1006, 0, 0, 0, 0, 0)
 
         parsed = parse_cal_file(data)
 
         self.assertIsNone(parsed.error_term_set)
         self.assertEqual([trace.key for trace in parsed.named_error_terms], keys)
-        self.assertEqual([trace.key for trace in parsed.mapped_measurements], ["SB_1(1,1)"])
+        self.assertEqual([trace.key for trace in parsed.mapped_measurements], mapped_keys)
+        for index, trace in enumerate(parsed.mapped_measurements, start=1):
+            self.assertIsNone(trace.frequencies_hz)
+            self.assertEqual(trace.points, [(index / 4, 0.0)] * 5000)
         for value, trace in enumerate(parsed.named_error_terms, start=1):
             self.assertIsNone(trace.frequencies_hz)
             self.assertEqual(trace.points, [(float(value), 0.0)] * 5000)
@@ -221,6 +226,11 @@ class CalRecordLayoutTests(unittest.TestCase):
             export_results(parsed, path)
             summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["counts"]["error_terms"], 3)
+            self.assertEqual(summary["counts"]["mapped_measurements"], 3)
+            with (path / "mapped_measurements.csv").open(newline="", encoding="utf-8") as f:
+                mapped_rows = list(csv.DictReader(f))
+            self.assertEqual(len(mapped_rows), 15_000)
+            self.assertEqual([row["trace_key"] for row in mapped_rows[::5000]], mapped_keys)
             with (path / "named_error_terms.csv").open(newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
             self.assertEqual(len(rows), 15_000)
