@@ -65,6 +65,22 @@ uv run --locked --with pyvisa python .\tools\export_error_term.py --verify-cal "
 
 `[CalSet identity]` 记录文件大小、SHA-256 和原 GUID，并查询原 GUID 是否存在于模拟器的 CalSet 存储。有未确认的矩阵行时，`[Matrix mismatch diagnostics]` 还会给出不同数据布局下的匹配数量，以及原布局下最近矩阵行的复数残差。残差大小只能用来定位差异。
 
+### 用单项修改验证存储关系
+
+当逐点匹配只确认部分行时，可以在模拟器中做一次差分实验。以下命令会创建两个新 CalSet 副本，在其中一个副本的 `Directivity(1,1)` 上加入三个复数标记，并用仪器读回值核对标记。请在测试用的 Simulator 会话中运行。
+
+```powershell
+uv run --locked --with pyvisa python .\tools\probe_cal_matrix.py prepare --calset CalSet_2Port --term "Directivity(1,1)"
+```
+
+按脚本打印的名称，在模拟器中分别将 `ProbeBase_...` 和 `ProbeEdit_...` 应用到测试通道，再各导出一个 `.cal` 文件。保存 `.cal` 会包含当前通道在用的 CalSet，所以两次导出各只应用对应的副本。把基准文件和标记文件分别保存为 `baseline.cal` 和 `modified.cal`，然后执行离线比较，`--original` 指向最初的校准文件。
+
+```powershell
+uv run --locked python .\tools\probe_cal_matrix.py compare .\baseline.cal .\modified.cal --original "$env:USERPROFILE\Desktop\CalSet\calset_2port.cal"
+```
+
+`[Matrix probe]` 报告变化的矩阵行和标记是否一致。只有一行完整重现读回的标记时，脚本才报告直接存储对应关系。`prepare` 默认生成 `calset_probe.json`，重复实验时可为两条命令指定相同的新 `--manifest` 路径。
+
 ### 为当前文件保存名称
 
 如果两端口或四端口文件的矩阵只显示 `Term 0` 等编号，可在能连接 PNA 的电脑上将导出文件与仪器上的同一 CalSet 逐点匹配：
