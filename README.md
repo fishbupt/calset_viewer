@@ -51,6 +51,20 @@ uv run --locked python parse_pna_cal.py "your_calset.cal" --inspect-mapped-measu
 
 ## 矩阵误差项名称
 
+### 用 VNA Simulator 验证矩阵行顺序
+
+在 VNA Simulator 中 Recall 要验证的 CalSet 后，在运行模拟器的 Windows 电脑上执行。
+
+```powershell
+uv run --locked --with pyvisa python .\tools\export_error_term.py --verify-cal "$env:USERPROFILE\Desktop\CalSet\calset_2port.cal"
+```
+
+默认连接 `TCPIP0::127.0.0.1::hislip0::INSTR`，可用 `--resource` 指定其他 VISA 地址。模拟器中使用了不同的 CalSet 名称时，可追加 `--calset "实际名称"`，或先用 `--list-calsets` 查询名称。该模式需要启用模拟器的远程控制。
+
+脚本核对校准端口和逐项频率轴，再比较全部复数点。在 `[Matrix row mapping]` 中报告唯一匹配、歧义和未匹配的行。请同时保留 `[Simulator terms]` 和 `Unique matches`，便于区分频率不匹配和复数值不匹配。验证只输出报告，查询数据时临时使用 ASCII 传输并恢复原设置。
+
+### 为当前文件保存名称
+
 如果两端口或四端口文件的矩阵只显示 `Term 0` 等编号，可在能连接 PNA 的电脑上将导出文件与仪器上的同一 CalSet 逐点匹配：
 
 ```sh

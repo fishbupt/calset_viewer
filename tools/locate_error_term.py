@@ -18,7 +18,7 @@ def read_reference(path):
     return values
 
 
-def parse_error_term_response(response):
+def parse_scpi_ascii_values(response):
     response = response.lstrip()
     if response.startswith("#"):
         if len(response) < 2 or response[1] not in "0123456789":
@@ -37,10 +37,17 @@ def parse_error_term_response(response):
             response = response[start:]
 
     values = tuple(float(token) for token in re.split(r"[,\s]+", response) if token)
-    if not values or len(values) % 2:
-        raise ValueError("Expected complete Re/Im pairs")
+    if not values:
+        raise ValueError("Expected at least one numeric value")
     if not all(math.isfinite(value) for value in values):
         raise ValueError("Reference contains non-finite values")
+    return values
+
+
+def parse_error_term_response(response):
+    values = parse_scpi_ascii_values(response)
+    if len(values) % 2:
+        raise ValueError("Expected complete Re/Im pairs")
     return values
 
 

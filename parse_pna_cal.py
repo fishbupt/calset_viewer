@@ -753,7 +753,7 @@ def match_matrix_error_term_names(
 ) -> Tuple[Dict[int, str], Dict[str, List[int]]]:
     """Assign names only when the full Re/Im trace has a one-to-one match."""
     candidates = {}
-    unique_hits: Dict[int, List[str]] = {}
+    names_by_row: Dict[int, List[str]] = {}
     for name, reference in references.items():
         hits = []
         for index, values in enumerate(matrix.error_terms):
@@ -764,9 +764,13 @@ def match_matrix_error_term_names(
             ):
                 hits.append(index)
         candidates[name] = hits
-        if len(hits) == 1:
-            unique_hits.setdefault(hits[0], []).append(name)
-    labels = {index: names[0] for index, names in unique_hits.items() if len(names) == 1}
+        for index in hits:
+            names_by_row.setdefault(index, []).append(name)
+    labels = {
+        index: names[0]
+        for index, names in names_by_row.items()
+        if len(names) == 1 and len(candidates[names[0]]) == 1
+    }
     return labels, candidates
 
 
