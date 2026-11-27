@@ -248,6 +248,56 @@ def print_mismatch_diagnostics(matrix, references, match_names):
         )
 
 
+def print_sign_and_reflection_checks(matrix, references, match_names):
+    print("\n[Sign and reflection checks]")
+    negated = {
+        name: [(-real, -imag) for real, imag in points]
+        for name, points in references.items()
+        if any(real or imag for real, imag in points)
+    }
+    matches, _ = match_names(matrix, negated)
+    print(f"  Negated terms: {len(matches)} unique full-trace matches")
+    for index, name in sorted(matches.items()):
+        print(f"    Term {index} = -{name}")
+
+    by_name = {
+        name.casefold(): [complex(real, imag) for real, imag in points]
+        for name, points in references.items()
+    }
+    scales = [
+        (f"Term {index}", [complex(real, imag) for real, imag in row])
+        for index, row in enumerate(matrix.error_terms)
+        if all((real or imag) and math.isfinite(real) and math.isfinite(imag) for real, imag in row)
+    ]
+    unity = [1.0] * len(matrix.freqs_ghz)
+    print("  Inverse reflection model: Gamma = (measured - D) / (M*measured + R - D*M)")
+    for port in matrix.port_ids:
+        suffix = f"({port},{port})"
+        directivity = by_name.get("directivity" + suffix)
+        source_match = by_name.get("sourcematch" + suffix)
+        tracking = by_name.get("reflectiontracking" + suffix)
+        if directivity is None or source_match is None or tracking is None:
+            print(f"    Port {port}: insufficient reference terms")
+            continue
+
+        # Test a common normalization factor at every frequency. All three
+        # coefficients must match different rows for a scaled candidate.
+        coefficients = {
+            "-D": [-value for value in directivity],
+            "M": source_match,
+            "R-D*M": [r - d * m for r, d, m in zip(tracking, directivity, source_match)],
+        }
+        for scale_name, scale in [("unity", unity), *scales]:
+            predictions = {}
+            for key, values in coefficients.items():
+                scaled = (a * b for a, b in zip(scale, values))
+                predictions[key] = [(value.real, value.imag) for value in scaled]
+            unique, candidates = match_names(matrix, predictions)
+            if scale_name == "unity" or len(unique) == len(coefficients):
+                detail = ", ".join(f"{key} -> {indices}" for key, indices in candidates.items())
+                print(f"    Port {port} | scale {scale_name} | {detail}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resource", default=DEFAULT_RESOURCE, help="VISA resource address")
@@ -357,6 +407,7 @@ def main():
                 print_verification_report(calset, matrix, labels, candidates, skipped)
                 if references and len(labels) != len(matrix.error_terms):
                     print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
+                    print_sign_and_reflection_checks(matrix, references, match_matrix_error_term_names)
                 return
             for name, indices in candidates.items():
                 if not indices:

@@ -16,7 +16,7 @@ from parse_pna_cal import ErrorTermSet, encode_cstringw, match_matrix_error_term
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "export_error_term.py"
 with patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
-    from export_error_term import main, print_mismatch_diagnostics
+    from export_error_term import main, print_mismatch_diagnostics, print_sign_and_reflection_checks
 
 
 class VerifyCalTests(unittest.TestCase):
@@ -164,4 +164,45 @@ class VerifyCalTests(unittest.TestCase):
             print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
 
         self.assertIn("point-major interleaved Re/Im: 2/2 unique matches", output.getvalue())
+        self.assertEqual(matrix.term_names, {})
+
+    def test_sign_and_reflection_checks_find_signed_and_scaled_coefficients(self):
+        def pairs(values):
+            return [(value.real, value.imag) for value in values]
+
+        d1, m1, r1 = 0.4 + 0.3j, 2.0 - 1.0j, 0.017j
+        d2, m2, r2 = 0.2 + 0.15j, -1.0 + 3.0j, 0.034 - 0.015j
+        scale2 = (1.2 + 0.5j, 0.9 - 0.1j, 0.6 + 0.7j)
+        references = {
+            "Directivity(1,1)": pairs([d1] * 3),
+            "SourceMatch(1,1)": pairs([m1] * 3),
+            "ReflectionTracking(1,1)": pairs([r1] * 3),
+            "Directivity(2,2)": pairs([d2] * 3),
+            "SourceMatch(2,2)": pairs([m2] * 3),
+            "ReflectionTracking(2,2)": pairs([r2] * 3),
+            "CrossTalk(2,1)": [(0.0, 0.0)] * 3,
+        }
+        matrix = ErrorTermSet(
+            offset=0, magic=1006, ver_a=1, ver_b=1, port_ids=[1, 2],
+            port_z0=[(50.0, 0.0)] * 2, freqs_ghz=[0.01, 0.02, 0.03],
+            error_terms=[
+                pairs([-d1] * 3),
+                pairs([m1] * 3),
+                pairs([r1 - d1 * m1] * 3),
+                pairs(scale2),
+                pairs(-d2 * a for a in scale2),
+                pairs(m2 * a for a in scale2),
+                pairs((r2 - d2 * m2) * a for a in scale2),
+                [(0.0, 0.0)] * 3,
+            ],
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            print_sign_and_reflection_checks(matrix, references, match_matrix_error_term_names)
+
+        report = output.getvalue()
+        self.assertIn("Term 0 = -Directivity(1,1)", report)
+        self.assertNotIn("-CrossTalk", report)
+        self.assertIn("Port 1 | scale unity | -D -> [0], M -> [1], R-D*M -> [2]", report)
+        self.assertIn("Port 2 | scale Term 3 | -D -> [4], M -> [5], R-D*M -> [6]", report)
         self.assertEqual(matrix.term_names, {})
