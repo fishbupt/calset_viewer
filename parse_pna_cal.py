@@ -202,6 +202,7 @@ class ParsedCalFile:
     metadata: Dict[str, Any] = field(default_factory=dict)
     error_term_set: Optional[ErrorTermSet] = None
     mapped_measurement_groups: List[MappedMeasurementGroup] = field(default_factory=list)
+    named_error_terms: List[ComplexTrace] = field(default_factory=list)
 
 
 def read_complex_float_trace(r: BinaryReader, key: str) -> ComplexTrace:
@@ -365,6 +366,45 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
                 except (ValueError, EOFError) as exc:
                     LOGGER.debug("Section 4 candidate at 0x%X: %s", idx - 4, exc)
                     continue
+    return []
+
+
+def find_and_parse_one_port_error_terms(data: bytes, start_offset: int) -> List[ComplexTrace]:
+    """Read a counted table of the three named reflection terms for one port."""
+    anchor = "Directivity(".encode("utf-16le")
+    table_prefix = struct.pack("<I", 3) + CSTRINGW_MARKER
+    pos = start_offset + len(table_prefix) + 1
+    while (key_text := data.find(anchor, pos)) >= 0:
+        pos = key_text + len(anchor)
+        table_start = key_text - len(table_prefix) - 1
+        if not data.startswith(table_prefix, table_start):
+            continue
+
+        reader = BinaryReader(data, table_start + 4)
+        try:
+            key = reader.read_cstringw()
+            match = re.fullmatch(r"Directivity\(([1-9][0-9]*),\1\)", key)
+            if match is None:
+                continue
+            port = match.group(1)
+            expected = {key, f"ReflectionTracking({port},{port})", f"SourceMatch({port},{port})"}
+            reader.pos = table_start
+            traces = parse_trace_map(reader)
+        except (ValueError, EOFError, struct.error) as exc:
+            LOGGER.debug("One-port error term candidate at 0x%X: %s", table_start, exc)
+            continue
+
+        point_count = len(traces[0].points)
+        if (
+            {trace.key for trace in traces} == expected
+            and point_count
+            and all(trace.dim_count == 1 and len(trace.points) == point_count for trace in traces)
+        ):
+            LOGGER.debug(
+                "One-port error terms at 0x%X..0x%X: port %s, %d points each",
+                table_start, reader.pos, port, point_count,
+            )
+            return traces
     return []
 
 
@@ -665,6 +705,9 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
     sec7_start = meta_end if meta_end is not None else sec3_end_hint
     LOGGER.debug("Section 7 ErrorTermSet search from 0x%X", sec7_start)
     error_term_set = find_and_parse_section7_error_terms(data, sec7_start)
+    named_error_terms = []
+    if not error_term_set and not mapped_groups and len(header.calset_records) == 1:
+        named_error_terms = find_and_parse_one_port_error_terms(data, saved_pos)
 
     return ParsedCalFile(
         file_size=len(data),
@@ -676,13 +719,16 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
         metadata=metadata,
         error_term_set=error_term_set,
         mapped_measurement_groups=mapped_groups,
+        named_error_terms=named_error_terms,
     )
 
 
 def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    named_error_term_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
+    named_error_term_count = len(parsed.named_error_terms) + sum(
+        len(group.error_terms) for group in parsed.mapped_measurement_groups
+    )
     matrix_term_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
     summary = {
         "file_size": parsed.file_size,
@@ -751,24 +797,24 @@ def export_results(parsed: ParsedCalFile, out_dir: Path) -> None:
                 for i, (re_v, im_v) in enumerate(tr.points):
                     writer.writerow([tr.key, i, f"{re_v:.9g}", f"{im_v:.9g}"])
 
-    if parsed.mapped_measurement_groups:
-        groups = parsed.mapped_measurement_groups
-        for filename, key_header, traces_by_group in (
-            ("mapped_measurements.csv", "trace_key", [group.traces for group in groups]),
-            ("diq_error_terms.csv", "error_term", [group.error_terms for group in groups]),
-        ):
-            if not any(traces_by_group):
-                continue
-            with (out_dir / filename).open("w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["calset_name", key_header, "point_index", "freq_hz", "real", "imag"])
-                for group, traces in zip(groups, traces_by_group):
-                    for trace in traces:
-                        for i, (re_v, im_v) in enumerate(trace.points):
-                            frequency = trace.frequencies_hz[i] if trace.frequencies_hz is not None else ""
-                            writer.writerow([
-                                group.calset.name, trace.key, i, frequency, f"{re_v:.9g}", f"{im_v:.9g}",
-                            ])
+    groups = parsed.mapped_measurement_groups
+    for filename, key_header, traces_by_calset in (
+        ("mapped_measurements.csv", "trace_key", [(g.calset.name, g.traces) for g in groups]),
+        ("diq_error_terms.csv", "error_term", [(g.calset.name, g.error_terms) for g in groups]),
+        ("named_error_terms.csv", "error_term", [(parsed.header.calset_name, parsed.named_error_terms)]),
+    ):
+        if not any(traces for _, traces in traces_by_calset):
+            continue
+        with (out_dir / filename).open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["calset_name", key_header, "point_index", "freq_hz", "real", "imag"])
+            for calset_name, traces in traces_by_calset:
+                for trace in traces:
+                    for i, (re_v, im_v) in enumerate(trace.points):
+                        frequency = "" if trace.frequencies_hz is None else trace.frequencies_hz[i]
+                        writer.writerow([
+                            calset_name, trace.key, i, frequency, f"{re_v:.9g}", f"{im_v:.9g}",
+                        ])
 
     if parsed.error_term_set:
         ets = parsed.error_term_set
@@ -807,6 +853,10 @@ def print_summary(parsed: ParsedCalFile) -> None:
             f"  {group.calset.name}: {len(group.traces)} mapped traces, "
             f"{len(group.error_terms)} named error terms"
         )
+    if parsed.named_error_terms:
+        print("\n--- Named Error Terms ---")
+        for trace in parsed.named_error_terms:
+            print(f"  {trace.key}: {len(trace.points)} pts")
     if parsed.metadata:
         print("\n--- Section 6: Metadata ---")
         for k, v in parsed.metadata.items():
@@ -835,7 +885,9 @@ def inspect_error_terms(data: bytes) -> None:
         print(f"Normal import: {type(exc).__name__}: {exc}")
     else:
         matrix_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
-        named_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
+        named_count = len(parsed.named_error_terms) + sum(
+            len(group.error_terms) for group in parsed.mapped_measurement_groups
+        )
         print(f"Normal import: {matrix_count} matrix terms, {named_count} named terms")
 
     print("\n[Error term matrix candidates]")

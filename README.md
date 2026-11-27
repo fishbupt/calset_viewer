@@ -39,6 +39,10 @@ CalSet 保存的内容、各项数据的用途及自研 VNA 的保存要求见 [
 3. 对于复数迹线，选择 **幅度（dB）/ 相位**、**线性幅度 / 相位**或**实部 / 虚部**。选中表格单元格后可用 `Ctrl+C` 复制。
 4. 使用 **导出当前项** 保存迹线 CSV，或使用 **导出全部** 输出 `summary.json` 及测量迹线和误差项 CSV。
 
+## 单端口校准数据
+
+在已识别的单端口格式中，左侧 **误差项** 节点按文件内的名称显示 `Directivity`、`ReflectionTracking` 和 `SourceMatch`。全量导出生成 `named_error_terms.csv`。记录缺少可识别的频率轴时，曲线和数据表保留点索引，CSV 的 `freq_hz` 留空。
+
 ## Differential IQ 校准数据
 
 包含多条 CalSet 记录的 DIQ 文件可在 **映射标准件测量** 下分别查看。界面和 CSV 保留迹线原有点序和频率值。频率值重复或未按升序排列时，曲线以点索引为横轴，数据表仍显示逐点频率。全量导出的 `mapped_measurements.csv` 包含 `calset_name` 与 `freq_hz` 两列，便于区分同名迹线。

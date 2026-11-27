@@ -67,18 +67,18 @@ class CalRecordLayoutTests(unittest.TestCase):
             # Another valid trace map shares the first key. The other term names identify
             # the actual error term map. A third map follows it, as in the DIQ sample.
             data += struct.pack("<I", 1)
-            data += self.diq_trace(term_keys[0], -1, frequencies, save_axis=False)
+            data += self.complex_trace(term_keys[0], -1, frequencies, save_axis=False)
             data += struct.pack("<I", len(term_keys))
             for key in term_keys:
-                data += self.diq_trace(
+                data += self.complex_trace(
                     key, index + 10, term_frequencies,
                     save_axis=index == 3 and key == "Directivity(1,1)",
                 )
             data += struct.pack("<I", 1)
-            data += self.diq_trace("CALALL_R(1)", -2, frequencies)
+            data += self.complex_trace("CALALL_R(1)", -2, frequencies)
 
-            data += self.diq_trace("SA_0(1,1)", index, frequencies)
-            data += self.diq_trace("TotalSourcePowerCorrection(1)", index + 3, frequencies)
+            data += self.complex_trace("SA_0(1,1)", index, frequencies)
+            data += self.complex_trace("TotalSourcePowerCorrection(1)", index + 3, frequencies)
             data += struct.pack("<I", 8) + encode_cstringw("DIQ Stimulus")
 
         parsed = parse_cal_file(data)
@@ -128,8 +128,55 @@ class CalRecordLayoutTests(unittest.TestCase):
             self.assertTrue(all(row["freq_hz"] for row in terms[21:24]))
             self.assertTrue(all(row["freq_hz"] == "" for row in terms[:21] + terms[24:]))
 
+    def test_one_port_named_error_terms_before_metadata_or_matrix(self):
+        name = "CalSet_OnePort"
+        data = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw(name) + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+
+        # The sample stores 3 consecutive length-prefixed records, each with
+        # outer_size=0x9C68 and inner_size=0x9C54 for 5000 complex float pairs.
+        keys = ["Directivity(1,1)", "ReflectionTracking(1,1)", "SourceMatch(1,1)"]
+        points = range(5000)
+        bad_keys = [keys[0], keys[1], "SourceMatch(2,2)"]
+        data += struct.pack("<I", 3)
+        for key in bad_keys:
+            data += self.complex_trace(key, -1, range(3), save_axis=False)
+        first_offset = len(data) + 4
+        data += struct.pack("<I", 3)
+        for index, key in enumerate(keys, start=1):
+            data += self.complex_trace(key, index, points, save_axis=False)
+        record_offset = first_offset + len(encode_cstringw(keys[0]))
+        self.assertEqual(struct.unpack_from("<I", data, record_offset + 2)[0], 0x9C68)
+        self.assertEqual(struct.unpack_from("<I", data, record_offset + 16)[0], 0x9C54)
+        data += struct.pack("<7I", 0, 1006, 0, 0, 0, 0, 0)
+
+        parsed = parse_cal_file(data)
+
+        self.assertIsNone(parsed.error_term_set)
+        self.assertEqual([trace.key for trace in parsed.named_error_terms], keys)
+        for value, trace in enumerate(parsed.named_error_terms, start=1):
+            self.assertIsNone(trace.frequencies_hz)
+            self.assertEqual(trace.points, [(float(value), 0.0)] * 5000)
+        with TemporaryDirectory() as directory:
+            path = Path(directory)
+            export_results(parsed, path)
+            summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["counts"]["error_terms"], 3)
+            with (path / "named_error_terms.csv").open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(len(rows), 15_000)
+            self.assertEqual([row["error_term"] for row in rows[::5000]], keys)
+            self.assertEqual(rows[4999]["point_index"], "4999")
+            self.assertTrue(all(row["freq_hz"] == "" for row in rows))
+            self.assertTrue(all(row["calset_name"] == name for row in rows))
+            self.assertEqual(rows[-1]["real"], "3")
+
     @staticmethod
-    def diq_trace(key, value, frequencies, *, save_axis=True):
+    def complex_trace(key, value, frequencies, *, save_axis=True):
         n = len(frequencies)
         inner = struct.pack("<IIHHII", 1, 0, 20, 3, 1, n)
         inner += struct.pack("<ff", value, 0) * n

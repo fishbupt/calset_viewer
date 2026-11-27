@@ -538,7 +538,9 @@ class CalSetViewerWindow(QMainWindow):
         self._populate_tree(parsed)
         self._update_status_bar(path, parsed)
         matrix_term_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
-        named_term_count = sum(len(group.error_terms) for group in parsed.mapped_measurement_groups)
+        named_term_count = len(parsed.named_error_terms) + sum(
+            len(group.error_terms) for group in parsed.mapped_measurement_groups
+        )
         LOGGER.info(
             "导入完成 | %s | 原始迹线 %d | 映射迹线 %d | 误差项 %d",
             path.name,
@@ -646,6 +648,11 @@ class CalSetViewerWindow(QMainWindow):
             sec7.setExpanded(True)
             if sec7.childCount() > 1:
                 self.tree.setCurrentItem(sec7.child(1))
+        elif p.named_error_terms:
+            named_terms = QTreeWidgetItem(self.tree, [f"误差项 ({len(p.named_error_terms)})"])
+            self._add_trace_nodes(named_terms, p.named_error_terms, source="named_error")
+            named_terms.setExpanded(True)
+            self.tree.setCurrentItem(named_terms.child(0))
         else:
             self.tree.setCurrentItem(sec1)
 
@@ -803,6 +810,7 @@ class CalSetViewerWindow(QMainWindow):
                 "raw": "Section 2 | 原始标准件测量",
                 "mapped": "Section 4 | 映射标准件测量",
                 "diq_error": "DIQ | 误差项",
+                "named_error": "单端口 | 误差项",
             }[source]
             group_index = meta.get("group_index")
             group_name = ""
@@ -810,6 +818,9 @@ class CalSetViewerWindow(QMainWindow):
                 group = p.mapped_measurement_groups[group_index]
                 traces = group.error_terms if source == "diq_error" else group.traces
                 group_name = group.calset.name
+            elif source == "named_error":
+                traces = p.named_error_terms
+                group_name = p.header.calset_name
             else:
                 traces = p.raw_measurements if source == "raw" else p.mapped_measurements
 
