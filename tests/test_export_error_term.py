@@ -16,7 +16,13 @@ from parse_pna_cal import ErrorTermSet, encode_cstringw, match_matrix_error_term
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "export_error_term.py"
 with patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
-    from export_error_term import main, print_mismatch_diagnostics, print_sign_and_reflection_checks
+    from export_error_term import (
+        check_grouped_reflection_rows,
+        main,
+        print_coefficient_samples,
+        print_mismatch_diagnostics,
+        print_sign_and_reflection_checks,
+    )
 
 
 class VerifyCalTests(unittest.TestCase):
@@ -206,3 +212,30 @@ class VerifyCalTests(unittest.TestCase):
         self.assertIn("Port 1 | scale unity | -D -> [0], M -> [1], R-D*M -> [2]", report)
         self.assertIn("Port 2 | scale Term 3 | -D -> [4], M -> [5], R-D*M -> [6]", report)
         self.assertEqual(matrix.term_names, {})
+
+    def test_grouped_check_recovers_scale_without_a_stored_scale_row(self):
+        coefficients = {
+            "-D": [0.25j, -0.25, 0.5j],
+            "M": [0.125, 0.25j, 0.125j],
+            "R-D*M": [0.5j, 0.25, 0.125],
+        }
+        scale = [1.25j, 2.0, 0.5j]
+        rows = [[(3.0, 0.0)] * 3 for _ in range(12)]
+        for key, index in [("-D", 7), ("M", 5), ("R-D*M", 10)]:
+            scaled = [a * b for a, b in zip(scale, coefficients[key])]
+            rows[index] = [(value.real, value.imag) for value in scaled]
+        matrix = ErrorTermSet(
+            offset=0, magic=1006, ver_a=1, ver_b=1, port_ids=[1, 2],
+            port_z0=[(50.0, 0.0)] * 2, freqs_ghz=[0.01, 0.02, 0.03],
+            error_terms=rows,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            check_grouped_reflection_rows(matrix, 2, coefficients, match_matrix_error_term_names)
+            print_coefficient_samples(matrix, {"Directivity(2,2)": [(0.25, 0.0)] * 3})
+
+        report = output.getvalue()
+        self.assertIn("Port 2 | grouped rows -D: 7, M: 5 | relative cross-product residual=0", report)
+        self.assertIn("From fitted common scale: R-D*M -> [10]", report)
+        self.assertIn("Point indices (0-based): 0, 1, 2", report)
+        self.assertIn("Directivity(2,2): (0.25,0)  (0.25,0)  (0.25,0)", report)

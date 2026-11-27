@@ -72,7 +72,7 @@ uv run --locked --with pyvisa python .\tools\export_error_term.py --verify-cal "
 脚本核对校准端口和逐项频率轴，再比较全部复数点。在 `[Matrix row mapping]` 中报告唯一匹配、歧义和未匹配的行。请同时保留 `[Simulator terms]` 和 `Unique matches`，便于区分频率不匹配和复数值不匹配。验证只输出报告，查询数据时临时使用 ASCII 传输并恢复原设置。
 
 `[CalSet identity]` 记录文件大小、SHA-256 和原 GUID，并查询原 GUID 是否存在于模拟器的 CalSet 存储。有未确认的矩阵行时，`[Matrix mismatch diagnostics]` 还会给出不同数据布局下的匹配数量，以及原布局下最近矩阵行的复数残差。残差大小只能用来定位差异。
-`[Sign and reflection checks]` 进一步比较整条曲线取负后的结果，并验证矩阵行是否符合一端口反射修正公式的系数。输出用于验证存储模型。
+`[Sign and reflection checks]` 逐点检验取负关系，并比较反射修正公式的各个系数。对于行数是端口数六倍的矩阵，还会检查方向性和源匹配的候选行是否共享同一归一化因子。`[Coefficient samples]` 报告同一频率轴的三个点，供对比存储行与模拟器具名误差项。
 
 ### 用单项修改验证存储关系
 

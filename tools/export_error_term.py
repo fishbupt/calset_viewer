@@ -292,10 +292,88 @@ def print_sign_and_reflection_checks(matrix, references, match_names):
             for key, values in coefficients.items():
                 scaled = (a * b for a, b in zip(scale, values))
                 predictions[key] = [(value.real, value.imag) for value in scaled]
-            unique, candidates = match_names(matrix, predictions)
-            if scale_name == "unity" or len(unique) == len(coefficients):
+            _, candidates = match_names(matrix, predictions)
+            d_rows, m_rows = candidates["-D"], candidates["M"]
+            distinct_anchors = len(d_rows) == len(m_rows) == 1 and d_rows != m_rows
+            if scale_name == "unity" or distinct_anchors:
                 detail = ", ".join(f"{key} -> {indices}" for key, indices in candidates.items())
                 print(f"    Port {port} | scale {scale_name} | {detail}")
+
+        check_grouped_reflection_rows(matrix, port, coefficients, match_names)
+
+
+def check_grouped_reflection_rows(matrix, port, coefficients, match_names):
+    port_count = len(matrix.port_ids)
+    if len(matrix.error_terms) != 6 * port_count:
+        return
+    port_index = matrix.port_ids.index(port)
+    d_index = 3 * port_count + port_index
+    m_index = 2 * port_count + port_index
+    d_row = [complex(*point) for point in matrix.error_terms[d_index]]
+    m_row = [complex(*point) for point in matrix.error_terms[m_index]]
+    d, m = coefficients["-D"], coefficients["M"]
+
+    # A common scale cancels out of B*M == C*(-D), even if that scale
+    # is not stored as a separate row.
+    left = [a * b for a, b in zip(d_row, m)]
+    right = [a * b for a, b in zip(m_row, d)]
+    residual = math.hypot(*(abs(a - b) for a, b in zip(left, right)))
+    level = max(math.hypot(*(abs(value) for value in left)),
+                math.hypot(*(abs(value) for value in right)))
+    if not level or not math.isfinite(residual) or not math.isfinite(level):
+        return
+    print(
+        f"    Port {port} | grouped rows -D: {d_index}, M: {m_index} "
+        f"| relative cross-product residual={residual / level:.6g}"
+    )
+    if not all(
+        math.isclose(a.real, b.real, rel_tol=5e-7, abs_tol=1e-12)
+        and math.isclose(a.imag, b.imag, rel_tol=5e-7, abs_tol=1e-12)
+        for a, b in zip(left, right)
+    ):
+        return
+
+    power = [abs(a) ** 2 + abs(b) ** 2 for a, b in zip(d, m)]
+    if not all(power):
+        return
+    scale = [
+        (a.conjugate() * x + b.conjugate() * y) / denominator
+        for a, b, x, y, denominator in zip(d, m, d_row, m_row, power)
+    ]
+    tracking = [a * b for a, b in zip(scale, coefficients["R-D*M"])]
+    predictions = {"R-D*M": [(value.real, value.imag) for value in tracking]}
+    _, candidates = match_names(matrix, predictions)
+    print(f"      From fitted common scale: R-D*M -> {candidates['R-D*M']}")
+
+
+def print_coefficient_samples(matrix, references):
+    """Print a few shared points for analyzing combinations of stored rows."""
+    count = len(matrix.freqs_ghz)
+    indices = sorted({0, count // 2, count - 1})
+    print("\n[Coefficient samples]")
+    print("  Point indices (0-based): " + ", ".join(map(str, indices)))
+    print("  Frequencies (GHz): " + ", ".join(f"{matrix.freqs_ghz[i]:.12g}" for i in indices))
+    traces = {f"Term {index}": row for index, row in enumerate(matrix.error_terms)}
+    # Keep all diagonal reflection terms and one load-match curve per
+    # receiver. Include the transmission paths connected to the first port.
+    first_port = matrix.port_ids[0]
+    load_ports = set()
+    for name, points in references.items():
+        match = re.fullmatch(r"([A-Za-z]+)\((\d+),\s*(\d+)\)", name)
+        if match is None:
+            continue
+        kind, receiver, source = match.group(1).casefold(), int(match[2]), int(match[3])
+        if kind in {"directivity", "sourcematch", "reflectiontracking"} and receiver == source:
+            traces[name] = points
+        elif kind == "loadmatch" and receiver not in load_ports:
+            traces[name] = points
+            load_ports.add(receiver)
+        elif kind == "transmissiontracking" and first_port in (receiver, source):
+            traces[name] = points
+
+    for name, points in traces.items():
+        values = "  ".join(f"({points[i][0]:.12g},{points[i][1]:.12g})" for i in indices)
+        print(f"  {name}: {values}")
 
 
 def main():
@@ -408,6 +486,7 @@ def main():
                 if references and len(labels) != len(matrix.error_terms):
                     print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
                     print_sign_and_reflection_checks(matrix, references, match_matrix_error_term_names)
+                    print_coefficient_samples(matrix, references)
                 return
             for name, indices in candidates.items():
                 if not indices:
