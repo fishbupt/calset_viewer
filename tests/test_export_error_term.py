@@ -11,11 +11,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from uuid import UUID
 
-from parse_pna_cal import encode_cstringw
+from parse_pna_cal import ErrorTermSet, encode_cstringw, match_matrix_error_term_names
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "export_error_term.py"
 with patch.object(sys, "path", [str(SCRIPT.parent), *sys.path]):
-    from export_error_term import main
+    from export_error_term import main, print_mismatch_diagnostics
 
 
 class VerifyCalTests(unittest.TestCase):
@@ -50,6 +50,7 @@ class VerifyCalTests(unittest.TestCase):
             ':CSET:ETER:CAT? "Simulator2Port"': catalog,
             ":FORM:DATA?": "REAL,64",
             ':CSET:PROP:PORT:CAT? "Simulator2Port"': "1,2",
+            ':CSET:EXIS? "{00000000-0000-0000-0000-000000000001}"': "0",
         }
         instrument.query.side_effect = query_responses.__getitem__
         axis = ",".join(map(str, freqs_hz)).encode("ascii")
@@ -74,6 +75,7 @@ class VerifyCalTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), data)
 
         report = output.getvalue()
+        self.assertIn("GUID exists in instrument storage: 0", report)
         self.assertIn("rows=12 | points=3", report)
         self.assertIn("Term 2: Directivity(1,1)", report)
         self.assertIn("Term 0: ambiguous (Isolation(2,1))", report)
@@ -82,6 +84,7 @@ class VerifyCalTests(unittest.TestCase):
         self.assertIn("LoadMatch(2,1): no matching row", report)
         self.assertIn("ReflectionTracking(2,2): skipped (trace point count=2", report)
         self.assertIn("Unique matches: 1/12 rows | verified traces: 3/5", report)
+        self.assertIn("Directivity(1,1): Term 2 | RMS residual=0 | max residual=0", report)
         self.assertNotIn(
             call(':CSET:ETER:DATA? "Simulator2Port","SourceMatch(1,1)"'),
             instrument.write.call_args_list,
@@ -92,3 +95,22 @@ class VerifyCalTests(unittest.TestCase):
         )
         instrument.close.assert_called_once()
         manager.close.assert_called_once()
+
+    def test_mismatch_diagnostics_recognizes_point_major_data(self):
+        references = {
+            "Directivity(1,1)": [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)],
+            "SourceMatch(1,1)": [(4.0, 5.0), (5.0, 6.0), (6.0, 7.0)],
+        }
+        point_major = [pair for point in zip(*references.values()) for pair in point]
+        rows = [point_major[:3], point_major[3:]]
+        matrix = ErrorTermSet(
+            offset=0, magic=1006, ver_a=1, ver_b=1, port_ids=[1, 2],
+            port_z0=[(50.0, 0.0)] * 2, freqs_ghz=[0.01, 0.02, 0.03],
+            error_terms=rows,
+        )
+        output = StringIO()
+        with redirect_stdout(output):
+            print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
+
+        self.assertIn("point-major interleaved Re/Im: 2/2 unique matches", output.getvalue())
+        self.assertEqual(matrix.term_names, {})

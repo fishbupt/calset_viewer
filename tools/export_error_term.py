@@ -1,11 +1,13 @@
 """Export CalSet error terms or verify a local .cal matrix against a PNA or VNA Simulator."""
 
 import argparse
+import hashlib
 import math
 import re
 import struct
 import sys
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from locate_error_term import parse_error_term_response, parse_scpi_ascii_values
@@ -141,6 +143,62 @@ def print_verification_report(calset, matrix, labels, candidates, skipped):
     )
 
 
+def print_mismatch_diagnostics(matrix, references, match_names):
+    rows = matrix.error_terms
+    flat_pairs = [pair for row in rows for pair in row]
+    term_major_planar = []
+    for row in rows:
+        scalars = [value for pair in row for value in pair]
+        points = len(row)
+        term_major_planar.append(list(zip(scalars[:points], scalars[points:])))
+
+    print("\n[Matrix mismatch diagnostics]")
+    layouts = {
+        "point-major interleaved Re/Im": [
+            flat_pairs[index::len(rows)] for index in range(len(rows))
+        ],
+        "term-major separate Re and Im": term_major_planar,
+        "term-major conjugated Re/Im": [
+            [(real, -imag) for real, imag in row] for row in rows
+        ],
+    }
+    for layout, alternative in layouts.items():
+        matched, _ = match_names(replace(matrix, error_terms=alternative), references)
+        print(f"  {layout}: {len(matched)}/{len(rows)} unique matches")
+        for index, name in sorted(matched.items()):
+            print(f"    Term {index}: {name}")
+
+    finite_rows = {
+        index: [complex(real, imag) for real, imag in row]
+        for index, row in enumerate(rows)
+        if all(math.isfinite(real) and math.isfinite(imag) for real, imag in row)
+    }
+    if not finite_rows:
+        print("  No finite rows available for residual comparison")
+        return
+
+    print("  Closest rows in the original layout (by complex RMS residual):")
+    for name, values in references.items():
+        reference = [complex(real, imag) for real, imag in values]
+        root_count = math.sqrt(len(reference))
+        residuals = {
+            index: math.hypot(*(abs(actual - expected) for actual, expected in zip(row, reference)))
+            / root_count
+            for index, row in finite_rows.items()
+        }
+        nearest = min(residuals, key=residuals.__getitem__)
+        residual = residuals[nearest]
+        reference_rms = math.hypot(*(abs(value) for value in reference)) / root_count
+        max_residual = max(
+            abs(actual - expected)
+            for actual, expected in zip(finite_rows[nearest], reference)
+        )
+        print(
+            f"    {name}: Term {nearest} | RMS residual={residual:.6g} "
+            f"| max residual={max_residual:.6g} | reference RMS={reference_rms:.6g}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resource", default=DEFAULT_RESOURCE, help="VISA resource address")
@@ -201,6 +259,18 @@ def main():
                     if args.list_calsets:
                         return
 
+                if args.verify_cal:
+                    guid = "{" + parsed.header.calset_guid + "}"
+                    print("\n[CalSet identity]")
+                    print(f"  File: {cal_path.name} | {len(cal_data)} bytes")
+                    print(f"  SHA-256: {hashlib.sha256(cal_data).hexdigest()}")
+                    print(f"  File CalSet: {parsed.header.calset_name} | GUID: {guid}")
+                    try:
+                        guid_exists = instrument.query(f":CSET:EXIS? {quote_scpi_name(guid)}").strip()
+                    except pyvisa.errors.Error as exc:
+                        guid_exists = f"unavailable ({exc})"
+                    print(f"  GUID exists in instrument storage: {guid_exists}")
+
                 term = args.term
                 if cal_path or args.list_terms or term is None:
                     names = split_catalog(instrument.query(f":CSET:ETER:CAT? {quote_scpi_name(calset)}"))
@@ -231,6 +301,8 @@ def main():
             labels, candidates = match_matrix_error_term_names(matrix, references)
             if args.verify_cal:
                 print_verification_report(calset, matrix, labels, candidates, skipped)
+                if references and len(labels) != len(matrix.error_terms):
+                    print_mismatch_diagnostics(matrix, references, match_matrix_error_term_names)
                 return
             for name, indices in candidates.items():
                 if not indices:
