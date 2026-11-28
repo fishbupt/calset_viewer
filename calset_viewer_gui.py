@@ -21,7 +21,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
-from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR, QStandardPaths, Qt, QUrl
+from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR, QSettings, QStandardPaths, Qt, QUrl
 from PyQt6.QtGui import (
     QAction,
     QCloseEvent,
@@ -95,6 +95,7 @@ FMT_RE_IM = "Re / Im"
 FMT_LIN_PHASE = "Mag(Lin) / Phase(°)"
 LOGGER = logging.getLogger("calset_viewer")
 CALSET_FILTER = "校准文件 (*.cal *.calset.json);;Keysight CalSet (*.cal);;Viewer 去嵌结果 (*.calset.json)"
+LAST_CALSET_DIRECTORY = "files/lastCalSetDirectory"
 
 
 class LogPanelHandler(logging.Handler):
@@ -514,6 +515,7 @@ class CalSetViewerWindow(QMainWindow):
         self.resize(1280, 760)
         self.setAcceptDrops(True)
 
+        self.settings = QSettings("CalSetViewer", "CalSetViewer")
         self.current_path: Optional[Path] = None
         self.parsed: Optional[ParsedCalFile] = None
         self.active_series_payload: Optional[dict[str, Any]] = None
@@ -800,10 +802,13 @@ class CalSetViewerWindow(QMainWindow):
     # ---------------- File Loading ----------------
 
     def on_open_dialog(self) -> None:
+        directory = self.settings.value(LAST_CALSET_DIRECTORY, "", type=str)
+        if directory and not Path(directory).is_dir():
+            directory = ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "打开 CalSet",
-            str(self.current_path.parent) if self.current_path else "",
+            directory,
             CALSET_FILTER,
         )
         if file_path:
@@ -838,6 +843,8 @@ class CalSetViewerWindow(QMainWindow):
         self.setWindowTitle(f"Keysight PNA Cal File Inspector - {path.name}")
         self._populate_tree(parsed)
         self._update_status_bar(path, parsed)
+        self.settings.setValue(LAST_CALSET_DIRECTORY, str(path.absolute().parent))
+        self.settings.sync()
         matrix_term_count = len(parsed.error_term_set.error_terms) if parsed.error_term_set else 0
         named_term_count = len(parsed.named_error_terms) + sum(
             len(group.error_terms) for group in parsed.mapped_measurement_groups
