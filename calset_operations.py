@@ -312,7 +312,9 @@ def deembed_calset(
     }
 
 
-def compare_terms(left: list[ComplexTrace], right: list[ComplexTrace]) -> list[TermComparison]:
+def compare_terms(
+    left: list[ComplexTrace], right: list[ComplexTrace], *, allow_point_order: bool = False,
+) -> list[TermComparison]:
     left_terms = {trace.key.casefold(): trace for trace in left}
     right_terms = {trace.key.casefold(): trace for trace in right}
     rows = []
@@ -324,9 +326,9 @@ def compare_terms(left: list[ComplexTrace], right: list[ComplexTrace]) -> list[T
             rows.append(TermComparison(a.key, "仅当前 CalSet 有", []))
         elif not a.points or len(a.points) != len(b.points):
             rows.append(TermComparison(a.key, "点数不同或无数据", []))
-        elif (a.frequencies_hz is None) != (b.frequencies_hz is None):
+        elif not allow_point_order and (a.frequencies_hz is None) != (b.frequencies_hz is None):
             rows.append(TermComparison(a.key, "一侧缺少频率轴", []))
-        elif a.frequencies_hz is not None and (
+        elif a.frequencies_hz is not None and b.frequencies_hz is not None and (
             len(a.frequencies_hz) != len(a.points) or len(b.frequencies_hz) != len(b.points)
             or not all(math.isclose(x, y, rel_tol=1e-12, abs_tol=1e-6) for x, y in zip(
                 a.frequencies_hz, b.frequencies_hz
@@ -346,6 +348,7 @@ def compare_terms(left: list[ComplexTrace], right: list[ComplexTrace]) -> list[T
                 rms = maximum * math.sqrt(
                     math.fsum((error / maximum) ** 2 for error in errors) / len(errors)
                 )
-            status = "逐频点" if a.frequencies_hz is not None else "按点序（两侧无频率轴）"
-            rows.append(TermComparison(a.key, status, differences, a.frequencies_hz, maximum, rms, peak_index))
+            axis = a.frequencies_hz if b.frequencies_hz is not None else None
+            status = "逐频点" if axis is not None else "按点序（频率未核对）"
+            rows.append(TermComparison(a.key, status, differences, axis, maximum, rms, peak_index))
     return rows

@@ -243,6 +243,45 @@ class CalRecordLayoutTests(unittest.TestCase):
             self.assertTrue(all(row["calset_name"] == name for row in rows))
             self.assertEqual(rows[-1]["real"], "3")
 
+    def test_afr_two_port_named_error_terms_with_no_matrix_or_trace_axis(self):
+        data = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet_2Port_Deembedded") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+        keys = [
+            "CrossTalk(1,2)", "CrossTalk(2,1)", "Directivity(1,1)", "Directivity(2,2)",
+            "LoadMatch(1,2)", "LoadMatch(2,1)", "ReflectionTracking(1,1)",
+            "ReflectionTracking(2,2)", "SourceMatch(1,1)", "SourceMatch(2,2)",
+            "TransmissionTracking(1,2)", "TransmissionTracking(2,1)",
+        ]
+        decoy = keys[:-1] + ["TransmissionTracking(3,1)"]
+        data += struct.pack("<I", 12) + b"".join(
+            self.complex_trace(key, -1, range(3), save_axis=False) for key in decoy
+        )
+        data += bytes(0x2EBE - len(data) - 4)
+        data += struct.pack("<I", 12) + b"".join(
+            self.complex_trace(key, index, range(5000), save_axis=False)
+            for index, key in enumerate(keys)
+        )
+        data += struct.pack("<7I", 0, 1006, 0, 0, 0, 0, 0)
+        record_offset = 0x2EBE + len(encode_cstringw(keys[0]))
+        self.assertEqual(struct.unpack_from("<I", data, record_offset + 2)[0], 0x9C68)
+        self.assertEqual(data.index(encode_cstringw(keys[1]), 0x2EBE), 0xCB4C)
+
+        parsed = parse_cal_file(data)
+
+        self.assertIsNone(parsed.error_term_set)
+        self.assertEqual([trace.key for trace in parsed.named_error_terms], keys)
+        for index, trace in enumerate(parsed.named_error_terms):
+            self.assertEqual(trace.points, [(float(index), 0.0)] * 5000)
+            self.assertIsNone(trace.frequencies_hz)
+        output = StringIO()
+        with redirect_stdout(output):
+            inspect_error_terms(data)
+        self.assertIn("Normal import: 0 matrix terms, 12 named terms", output.getvalue())
+
     @staticmethod
     def complex_trace(key, value, frequencies, *, save_axis=True):
         n = len(frequencies)

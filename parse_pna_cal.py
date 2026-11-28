@@ -393,40 +393,55 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
     return []
 
 
-def find_and_parse_one_port_error_terms(data: bytes, start_offset: int) -> List[ComplexTrace]:
-    """Read a counted table of the three named reflection terms for one port."""
-    anchor = "Directivity(".encode("utf-16le")
-    table_prefix = struct.pack("<I", 3) + CSTRINGW_MARKER
-    pos = start_offset + len(table_prefix) + 1
-    while (key_text := data.find(anchor, pos)) >= 0:
-        pos = key_text + len(anchor)
-        table_start = key_text - len(table_prefix) - 1
-        if not data.startswith(table_prefix, table_start):
+REFLECTION_TERM_NAMES = ("Directivity", "ReflectionTracking", "SourceMatch")
+TRANSMISSION_TERM_NAMES = ("CrossTalk", "LoadMatch", "TransmissionTracking")
+NAMED_ERROR_KEY_PREFIX = re.compile(
+    re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:"
+    + b"|".join(
+        re.escape((name + "(").encode("utf-16le"))
+        for name in (*REFLECTION_TERM_NAMES, *TRANSMISSION_TERM_NAMES, "Isolation")
+    )
+    + rb")"
+)
+ERROR_TERM_PORTS = re.compile(r"[A-Za-z]+\(([1-9]\d*),([1-9]\d*)\)")
+
+
+def find_and_parse_named_error_terms(data: bytes, start_offset: int) -> List[ComplexTrace]:
+    """Read a complete one-port or two-port table of named error terms."""
+    for anchor in NAMED_ERROR_KEY_PREFIX.finditer(data, start_offset + 4):
+        table_start = anchor.start() - 4
+        count, = struct.unpack_from("<I", data, table_start)
+        if count not in (3, 12):
             continue
 
-        reader = BinaryReader(data, table_start + 4)
+        reader = BinaryReader(data, table_start)
         try:
-            key = reader.read_cstringw()
-            match = re.fullmatch(r"Directivity\(([1-9][0-9]*),\1\)", key)
-            if match is None:
-                continue
-            port = match.group(1)
-            expected = {key, f"ReflectionTracking({port},{port})", f"SourceMatch({port},{port})"}
-            reader.pos = table_start
             traces = parse_trace_map(reader)
         except (ValueError, EOFError, struct.error) as exc:
-            LOGGER.debug("One-port error term candidate at 0x%X: %s", table_start, exc)
+            LOGGER.debug("Named error term candidate at 0x%X: %s", table_start, exc)
             continue
 
+        names = {trace.key for trace in traces}
+        pairs = [ERROR_TERM_PORTS.fullmatch(name) for name in names]
+        if len(names) != count or any(pair is None for pair in pairs):
+            continue
+        ports = {port for pair in pairs for port in pair.groups()}
+        expected = {
+            f"{name}({port},{port})" for port in ports for name in REFLECTION_TERM_NAMES
+        } | {
+            f"{name}({receiver},{source})"
+            for receiver in ports for source in ports if receiver != source
+            for name in TRANSMISSION_TERM_NAMES
+        }
         point_count = len(traces[0].points)
         if (
-            {trace.key for trace in traces} == expected
+            names == expected
             and point_count
             and all(trace.dim_count == 1 and len(trace.points) == point_count for trace in traces)
         ):
             LOGGER.debug(
-                "One-port error terms at 0x%X..0x%X: port %s, %d points each",
-                table_start, reader.pos, port, point_count,
+                "Named error terms at 0x%X..0x%X: %d ports, %d traces, %d points each",
+                table_start, reader.pos, len(ports), count, point_count,
             )
             return traces
     return []
@@ -791,7 +806,7 @@ def parse_cal_file(data: bytes) -> ParsedCalFile:
     reconstructed_error_terms = []
     if not mapped_groups and len(header.calset_records) == 1:
         if error_term_set is None:
-            named_error_terms = find_and_parse_one_port_error_terms(data, saved_pos)
+            named_error_terms = find_and_parse_named_error_terms(data, saved_pos)
         elif (
             len(error_term_set.port_ids) in (2, 4)
             and len(set(error_term_set.port_ids)) == len(error_term_set.port_ids)
@@ -1173,15 +1188,8 @@ def inspect_error_terms(data: bytes) -> None:
             offset = data.find(magic, offset + len(magic))
 
     print("\n[Named error term keys]")
-    names = ("Directivity", "SourceMatch", "ReflectionTracking",
-             "LoadMatch", "TransmissionTracking", "CrossTalk", "Isolation")
-    pattern = re.compile(
-        re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:"
-        + b"|".join(re.escape((name + "(").encode("utf-16le")) for name in names)
-        + rb")"
-    )
     count = 0
-    for match in pattern.finditer(data):
+    for match in NAMED_ERROR_KEY_PREFIX.finditer(data):
         offset = match.start()
         reader = BinaryReader(data, offset)
         try:

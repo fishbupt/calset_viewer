@@ -33,6 +33,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -286,7 +287,6 @@ class CalSetComparisonDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("比较 CalSet")
         self.resize(960, 720)
-        self.rows = compare_terms(left, right)
         self.left = {trace.key.casefold(): trace for trace in left}
         self.right = {trace.key.casefold(): trace for trace in right}
         self.left_name = left_name
@@ -295,7 +295,10 @@ class CalSetComparisonDialog(QDialog):
         description = QLabel(f"当前  {left_name}\n参考  {right_name}\nΔ = 当前 − 参考", self)
         description.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(description)
-        self.table = QTableWidget(len(self.rows), len(self.HEADERS), self)
+        self.point_order = QCheckBox("一侧缺少频率轴时按点序比较", self)
+        self.point_order.setToolTip("仅在确认两份 CalSet 使用相同扫频时启用。")
+        layout.addWidget(self.point_order)
+        self.table = QTableWidget(0, len(self.HEADERS), self)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -318,6 +321,17 @@ class CalSetComparisonDialog(QDialog):
         actions.rejected.connect(self.reject)
         layout.addWidget(actions)
 
+        self.table.currentCellChanged.connect(self.show_trace)
+        self.view.currentIndexChanged.connect(self.show_trace)
+        self.point_order.toggled.connect(self.populate_comparison)
+        self.populate_comparison()
+
+    def populate_comparison(self) -> None:
+        self.rows = compare_terms(
+            list(self.left.values()), list(self.right.values()),
+            allow_point_order=self.point_order.isChecked(),
+        )
+        self.table.setRowCount(len(self.rows))
         self.report = []
         for i, row in enumerate(self.rows):
             peak = ""
@@ -333,12 +347,11 @@ class CalSetComparisonDialog(QDialog):
             self.report.append(values)
             for col, value in enumerate(values):
                 self.table.setItem(i, col, QTableWidgetItem(value))
-        self.table.currentCellChanged.connect(self.show_trace)
-        self.view.currentIndexChanged.connect(self.show_trace)
         if self.rows:
             row_index = next((i for i, row in enumerate(self.rows) if row.residuals), 0)
             self.table.setCurrentCell(row_index, 0)
             self.table.selectRow(row_index)
+            self.show_trace()
 
     def show_trace(self) -> None:
         index = self.table.currentRow()
@@ -1090,7 +1103,7 @@ class CalSetViewerWindow(QMainWindow):
                 "raw": "Section 2 | 原始标准件测量",
                 "mapped": "Section 4 | 映射标准件测量",
                 "diq_error": "DIQ | 误差项",
-                "named_error": "单端口 | 误差项",
+                "named_error": "具名误差项",
                 "reconstructed_error": "误差项（去嵌）" if p.header.magic == DERIVED_FORMAT else "误差项（重建）",
             }[source]
             group_index = meta.get("group_index")

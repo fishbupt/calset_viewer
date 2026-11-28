@@ -141,6 +141,19 @@ class CalSetOperationsTests(unittest.TestCase):
         self.assertEqual(indexed["SourceMatch(1,1)"].status, "频率轴不一致")
         self.assertEqual(indexed["CrossTalk(2,1)"].status, "仅参考 CalSet 有")
 
+    def test_missing_frequency_axis_can_be_compared_explicitly_by_point_order(self):
+        with_axis = trace("Directivity(1,1)", 1j)
+        no_axis = trace("Directivity(1,1)", -1j, None)
+        self.assertEqual(compare_terms([with_axis], [no_axis])[0].status, "一侧缺少频率轴")
+        for first, second in ((with_axis, no_axis), (no_axis, with_axis)):
+            row = compare_terms([first], [second], allow_point_order=True)[0]
+            self.assertEqual(row.status, "按点序（频率未核对）")
+            self.assertIsNone(row.peak_frequency_hz)
+            self.assertEqual(row.max_error, 2.0)
+        other_axis = trace("Directivity(1,1)", -1j, (1e9, 3e9))
+        row = compare_terms([with_axis], [other_axis], allow_point_order=True)[0]
+        self.assertEqual(row.status, "频率轴不一致")
+
 
 if __name__ == "__main__":
     unittest.main()
