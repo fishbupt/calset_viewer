@@ -177,8 +177,6 @@ class TracePlotWidget(QWidget):
         x_label: str,
         points: List[Tuple[float, float]],
         display_format: str,
-        *,
-        reference_points: Optional[List[Tuple[float, float]]] = None,
     ) -> None:
         if not HAS_MATPLOTLIB or self.figure is None or self.canvas is None:
             return
@@ -205,10 +203,6 @@ class TracePlotWidget(QWidget):
             y1_label, y2_label = "Mag (dB)", "Phase (deg)"
             l1, l2 = "Mag", "Phase"
 
-        if reference_points is not None:
-            l1 = l2 = "Current"
-            ax1.plot(x_vals, [point[0] for point in reference_points], "--", color="#65758b", label="Reference")
-            ax2.plot(x_vals, [point[1] for point in reference_points], "--", color="#65758b", label="Reference")
         ax1.plot(x_vals, y1, color="#1f77b4", linewidth=1.4, label=l1)
         ax1.set_ylabel(y1_label, fontsize=9)
         ax1.grid(True, linestyle="--", alpha=0.45)
@@ -228,6 +222,67 @@ class TracePlotWidget(QWidget):
         self.figure.subplots_adjust(
             left=0.10, right=0.97, top=0.95, bottom=0.12, hspace=0.28
         )
+        self.canvas.draw_idle()
+
+
+    def plot_comparison(
+        self,
+        x_vals: List[float],
+        x_label: str,
+        current: List[Tuple[float, float]],
+        reference: List[Tuple[float, float]],
+        *,
+        phase: bool,
+    ) -> None:
+        if self.figure is None or self.canvas is None:
+            return
+
+        def plot_value(real: float, imag: float) -> float:
+            magnitude = math.hypot(real, imag)
+            if magnitude == 0.0:
+                return math.nan
+            if phase:
+                return math.degrees(math.atan2(imag, real))
+            return 20.0 * math.log10(magnitude)
+
+        current_values = [plot_value(*point) for point in current]
+        reference_values = [plot_value(*point) for point in reference]
+        differences = [a - b for a, b in zip(current_values, reference_values)]
+        if phase:
+            differences = [(value + 180.0) % 360.0 - 180.0 for value in differences]
+
+        self.figure.clear()
+        grid = self.figure.add_gridspec(2, 1, height_ratios=(2, 1), hspace=0.12)
+        overlay = self.figure.add_subplot(grid[0])
+        delta = self.figure.add_subplot(grid[1], sharex=overlay)
+        overlay.tick_params(labelbottom=False)
+        marker = "." if len(x_vals) == 1 else None
+        overlay.plot(
+            x_vals, current_values, color="#2563EB", linewidth=1.4,
+            label="Current", marker=marker,
+        )
+        overlay.plot(
+            x_vals, reference_values, "--", color="#D97706", linewidth=1.4,
+            label="Reference", marker=marker,
+        )
+        overlay.legend(loc="upper right", fontsize=8)
+        delta.axhline(0, color="#94A3B8", linewidth=0.8, zorder=0)
+        delta.plot(x_vals, differences, color="#475569", linewidth=1.3, marker=marker)
+        if not any(math.isfinite(value) for value in differences):
+            delta.text(
+                0.5, 0.5, "No valid differences", transform=delta.transAxes,
+                ha="center", va="center", color="#64748B", fontsize=9,
+                bbox={"facecolor": "white", "edgecolor": "none"},
+            )
+
+        quantity = "Phase (°)" if phase else "Magnitude (dB)"
+        overlay.set_ylabel(quantity, fontsize=9)
+        delta.set_ylabel(f"Δ {quantity}", fontsize=9)
+        delta.set_xlabel(x_label, fontsize=9)
+        for axes in (overlay, delta):
+            axes.grid(True, color="#E7ECF3")
+            axes.tick_params(labelsize=8)
+        self.figure.subplots_adjust(left=0.12, right=0.97, top=0.95, bottom=0.16)
         self.canvas.draw_idle()
 
 
@@ -300,6 +355,8 @@ class CalSetComparisonDialog(QDialog):
         layout.addWidget(self.point_order)
         self.table = QTableWidget(0, len(self.HEADERS), self)
         self.table.setHorizontalHeaderLabels(self.HEADERS)
+        for column in (3, 4):
+            self.table.horizontalHeaderItem(column).setToolTip("按复数残差的模统计。")
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -309,7 +366,8 @@ class CalSetComparisonDialog(QDialog):
         self.info.setTextFormat(Qt.TextFormat.PlainText)
         self.plot = TracePlotWidget(self)
         self.view = QComboBox(self)
-        self.view.addItems(["实部 / 虚部叠加", "复数差值 Δ"])
+        self.view.addItem("幅度（dB）", False)
+        self.view.addItem("相位（°）", True)
         view_row = QHBoxLayout()
         view_row.addWidget(self.info, 1)
         view_row.addWidget(self.view)
@@ -367,14 +425,11 @@ class CalSetComparisonDialog(QDialog):
             x_vals, x_label = [hz / 1e9 for hz in axis], "Frequency (GHz)"
         else:
             x_vals, x_label = list(range(len(row.residuals))), "Point Index"
-        if self.view.currentIndex() == 0:
-            key = row.name.casefold()
-            self.plot.plot_complex_series(
-                row.name, x_vals, x_label, self.left[key].points, FMT_RE_IM,
-                reference_points=self.right[key].points,
-            )
-        else:
-            self.plot.plot_complex_series(row.name, x_vals, x_label, row.residuals, FMT_RE_IM)
+        key = row.name.casefold()
+        self.plot.plot_comparison(
+            x_vals, x_label, self.left[key].points, self.right[key].points,
+            phase=self.view.currentData(),
+        )
 
     def export_csv(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(
