@@ -394,6 +394,7 @@ def find_and_parse_section4_mapped(data: bytes, start_offset: int) -> List[Compl
 
 
 REFLECTION_TERM_NAMES = ("Directivity", "ReflectionTracking", "SourceMatch")
+REFLECTION_KEY_PREFIXES = tuple(name + "(" for name in REFLECTION_TERM_NAMES)
 TRANSMISSION_TERM_NAMES = ("CrossTalk", "LoadMatch", "TransmissionTracking")
 NAMED_ERROR_KEY_PREFIX = re.compile(
     re.escape(CSTRINGW_MARKER) + rb"[\x01-\xfe](?:"
@@ -404,19 +405,34 @@ NAMED_ERROR_KEY_PREFIX = re.compile(
     + rb")"
 )
 ERROR_TERM_PORTS = re.compile(r"[A-Za-z]+\(([1-9]\d*),([1-9]\d*)\)")
+DIRECTIVITY_KEY_TEXT = "Directivity(".encode("utf-16le")
 
 
 def find_and_parse_named_error_terms(data: bytes, start_offset: int) -> List[ComplexTrace]:
-    """Read a complete one-port, two-port, or four-port named error term table."""
+    """Read named error terms, including the one-port AFR records without a count."""
+    uncounted = []
     for anchor in NAMED_ERROR_KEY_PREFIX.finditer(data, start_offset + 4):
-        table_start = anchor.start() - 4
+        key_offset = anchor.start()
+        table_start = key_offset - 4
         count, = struct.unpack_from("<I", data, table_start)
-        if count not in (3, 12, 36, 48):
-            continue
+        has_count = count in (3, 12, 36, 48)
+        if not has_count:
+            if count != 0 or uncounted or not data.startswith(DIRECTIVITY_KEY_TEXT, key_offset + 4):
+                continue
+            table_start = key_offset
+            count = len(REFLECTION_TERM_NAMES)
 
         reader = BinaryReader(data, table_start)
         try:
-            traces = parse_trace_map(reader)
+            if has_count:
+                traces = parse_trace_map(reader)
+            else:
+                traces = []
+                for _ in REFLECTION_TERM_NAMES:
+                    key = reader.read_cstringw()
+                    if not key.startswith(REFLECTION_KEY_PREFIXES):
+                        break
+                    traces.append(read_complex_float_trace(reader, key))
         except (ValueError, EOFError, struct.error) as exc:
             LOGGER.debug("Named error term candidate at 0x%X: %s", table_start, exc)
             continue
@@ -443,11 +459,13 @@ def find_and_parse_named_error_terms(data: bytes, start_offset: int) -> List[Com
             and all(trace.dim_count == 1 and len(trace.points) == point_count for trace in traces)
         ):
             LOGGER.debug(
-                "Named error terms at 0x%X..0x%X: %d ports, %d traces, %d points each",
-                table_start, reader.pos, len(ports), count, point_count,
+                "Named error terms at 0x%X..0x%X: %d ports, %d traces, %d points each, counted=%s",
+                table_start, reader.pos, len(ports), count, point_count, has_count,
             )
-            return traces
-    return []
+            if has_count:
+                return traces
+            uncounted = traces
+    return uncounted
 
 
 def find_and_parse_diq_error_terms(
