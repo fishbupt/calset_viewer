@@ -28,7 +28,9 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
+    QKeyEvent,
     QKeySequence,
+    QShortcut,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -342,6 +344,7 @@ class CalSetComparisonDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("比较 CalSet")
         self.resize(960, 720)
+        self._windowed_geometry = None
         self.left = {trace.key.casefold(): trace for trace in left}
         self.right = {trace.key.casefold(): trace for trace in right}
         self.left_name = left_name
@@ -371,6 +374,13 @@ class CalSetComparisonDialog(QDialog):
         view_row = QHBoxLayout()
         view_row.addWidget(self.info, 1)
         view_row.addWidget(self.view)
+        self.fullscreen_button = QPushButton("全屏", self)
+        self.fullscreen_button.setAutoDefault(False)
+        self.fullscreen_button.setToolTip("F11 切换全屏，Esc 退出全屏")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        view_row.addWidget(self.fullscreen_button)
+        self.fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self.fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
         layout.addLayout(view_row)
         layout.addWidget(self.plot, 2)
         actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
@@ -383,6 +393,24 @@ class CalSetComparisonDialog(QDialog):
         self.view.currentIndexChanged.connect(self.show_trace)
         self.point_order.toggled.connect(self.populate_comparison)
         self.populate_comparison()
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+            if self._windowed_geometry is not None:
+                self.restoreGeometry(self._windowed_geometry)
+            self.fullscreen_button.setText("全屏")
+        else:
+            self._windowed_geometry = self.saveGeometry()
+            self.showFullScreen()
+            self.fullscreen_button.setText("退出全屏")
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def populate_comparison(self) -> None:
         self.rows = compare_terms(
