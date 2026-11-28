@@ -289,14 +289,26 @@ class TracePlotWidget(QWidget):
 
 
 class FixtureDialog(QDialog):
-    def __init__(self, parent: QWidget, ports: list[int], directory: Path) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        ports: list[int],
+        directory: Path,
+        *,
+        needs_impedance: bool,
+        needs_frequency_axis: bool,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("夹具去嵌 CalSet")
-        self.resize(680, 190)
         self.directory = directory
         self.inputs = {}
+        self.reference_impedance: float | None = None
+        self.impedance_input: QLineEdit | None = None
+        self.use_fixture_axis = QCheckBox("确认 CalSet 与夹具的频点及顺序完全一致", self)
+        self.use_fixture_axis.setVisible(needs_frequency_axis)
+        self.needs_frequency_axis = needs_frequency_axis
         layout = QFormLayout(self)
-        layout.addRow(QLabel("为一个或两个端口选择 .s2p。留空的端口按理想直通处理。"))
+        layout.addRow(QLabel("为需要去嵌的端口选择 .s2p。留空的端口按直通处理。"))
         for port in ports:
             filename = QLineEdit(self)
             filename.setPlaceholderText("选择夹具文件")
@@ -310,6 +322,13 @@ class FixtureDialog(QDialog):
             row.addWidget(direction)
             layout.addRow(f"VNA 端口 {port}", row)
             self.inputs[port] = (filename, direction)
+        if needs_impedance:
+            self.impedance_input = QLineEdit(self)
+            self.impedance_input.setPlaceholderText("填写校准时使用的参考阻抗，例如 50")
+            layout.addRow("CalSet 参考阻抗 (Ω)", self.impedance_input)
+        if needs_frequency_axis:
+            self.use_fixture_axis.setToolTip("结果将采用夹具文件的频率轴。")
+            layout.addRow("CalSet 频率轴缺失", self.use_fixture_axis)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
@@ -318,6 +337,7 @@ class FixtureDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
+        self.resize(680, self.sizeHint().height())
 
     def browse(self, field: QLineEdit) -> None:
         name, _ = QFileDialog.getOpenFileName(
@@ -330,6 +350,18 @@ class FixtureDialog(QDialog):
     def accept(self) -> None:
         if not any(field.text().strip() for field, _ in self.inputs.values()):
             QMessageBox.warning(self, "缺少夹具", "请至少选择一个端口的 .s2p 文件。")
+            return
+        if self.impedance_input is not None:
+            try:
+                z0 = float(self.impedance_input.text())
+                if not math.isfinite(z0) or z0 <= 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "参考阻抗", "请输入 CalSet 的正实参考阻抗。")
+                return
+            self.reference_impedance = z0
+        if self.needs_frequency_axis and not self.use_fixture_axis.isChecked():
+            QMessageBox.warning(self, "校准频点", "请核对 CalSet 与夹具的频点及顺序。")
             return
         super().accept()
 
@@ -822,7 +854,7 @@ class CalSetViewerWindow(QMainWindow):
 
     def on_deembed_calset(self) -> None:
         if self.parsed is None or self.current_path is None:
-            QMessageBox.information(self, "夹具去嵌", "请先打开常规两端口 CalSet。")
+            QMessageBox.information(self, "夹具去嵌", "请先打开常规 S 参数 CalSet。")
             return
         try:
             ports = fixture_calibration_ports(self.parsed)
@@ -830,7 +862,12 @@ class CalSetViewerWindow(QMainWindow):
             QMessageBox.information(self, "夹具去嵌", str(exc))
             return
 
-        dialog = FixtureDialog(self, [port for port, _ in ports], self.current_path.parent)
+        traces = self.parsed.reconstructed_error_terms or self.parsed.named_error_terms
+        dialog = FixtureDialog(
+            self, [port for port, _ in ports], self.current_path.parent,
+            needs_impedance=any(z0 is None for _, z0 in ports),
+            needs_frequency_axis=all(trace.frequencies_hz is None for trace in traces),
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -838,7 +875,11 @@ class CalSetViewerWindow(QMainWindow):
                 port: read_fixture(Path(field.text().strip()), direction.currentIndex() == 1)
                 for port, (field, direction) in dialog.inputs.items() if field.text().strip()
             }
-            result = deembed_calset(self.parsed, self.current_path, fixtures)
+            result = deembed_calset(
+                self.parsed, self.current_path, fixtures,
+                reference_impedance=dialog.reference_impedance,
+                use_fixture_frequency_axis=dialog.use_fixture_axis.isChecked(),
+            )
             source_name = self.current_path.name.removesuffix(".calset.json")
             if self.current_path.suffix.lower() == ".cal":
                 source_name = self.current_path.stem

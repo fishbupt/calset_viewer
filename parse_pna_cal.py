@@ -407,11 +407,11 @@ ERROR_TERM_PORTS = re.compile(r"[A-Za-z]+\(([1-9]\d*),([1-9]\d*)\)")
 
 
 def find_and_parse_named_error_terms(data: bytes, start_offset: int) -> List[ComplexTrace]:
-    """Read a complete one-port or two-port table of named error terms."""
+    """Read a complete one-port, two-port, or four-port named error term table."""
     for anchor in NAMED_ERROR_KEY_PREFIX.finditer(data, start_offset + 4):
         table_start = anchor.start() - 4
         count, = struct.unpack_from("<I", data, table_start)
-        if count not in (3, 12):
+        if count not in (3, 12, 36, 48):
             continue
 
         reader = BinaryReader(data, table_start)
@@ -426,12 +426,15 @@ def find_and_parse_named_error_terms(data: bytes, start_offset: int) -> List[Com
         if len(names) != count or any(pair is None for pair in pairs):
             continue
         ports = {port for pair in pairs for port in pair.groups()}
+        transmission_names = TRANSMISSION_TERM_NAMES
+        if len(ports) == 4 and count == 36:
+            transmission_names = ("LoadMatch", "TransmissionTracking")
         expected = {
             f"{name}({port},{port})" for port in ports for name in REFLECTION_TERM_NAMES
         } | {
             f"{name}({receiver},{source})"
             for receiver in ports for source in ports if receiver != source
-            for name in TRANSMISSION_TERM_NAMES
+            for name in transmission_names
         }
         point_count = len(traces[0].points)
         if (

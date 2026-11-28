@@ -282,6 +282,33 @@ class CalRecordLayoutTests(unittest.TestCase):
             inspect_error_terms(data)
         self.assertIn("Normal import: 0 matrix terms, 12 named terms", output.getvalue())
 
+    def test_reads_complete_four_port_named_error_tables_for_comparison(self):
+        header = (
+            encode_cstringw("PNA Cal File")
+            + struct.pack("<III", 1, 3, 1)
+            + encode_cstringw("CalSet_4Port_Deembedded") + UUID(int=1).bytes_le
+            + struct.pack("<IIIIIHII", 0, 0, 0x3C, 2, 1, 15, 0, 0)
+        )
+        ports = (1, 2, 3, 4)
+        reflection = [
+            f"{name}({port},{port})" for name in ("Directivity", "SourceMatch", "ReflectionTracking")
+            for port in ports
+        ]
+        for names, count in ((("LoadMatch", "TransmissionTracking"), 36),
+                             (("CrossTalk", "LoadMatch", "TransmissionTracking"), 48)):
+            with self.subTest(count=count):
+                keys = sorted(reflection + [
+                    f"{name}({receiver},{source})" for name in names
+                    for receiver in ports for source in ports if receiver != source
+                ])
+                data = header + struct.pack("<I", count) + b"".join(
+                    self.complex_trace(key, index, (1e9, 2e9), save_axis=False)
+                    for index, key in enumerate(keys)
+                )
+                parsed = parse_cal_file(data)
+                self.assertEqual([trace.key for trace in parsed.named_error_terms], keys)
+                self.assertIsNone(parsed.error_term_set)
+
     @staticmethod
     def complex_trace(key, value, frequencies, *, save_axis=True):
         n = len(frequencies)

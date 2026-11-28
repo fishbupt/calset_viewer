@@ -13,6 +13,8 @@ from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from parse_pna_cal import (
+    ERROR_TERM_PORTS,
+    REFLECTION_TERM_NAMES,
     CalSetHeader,
     CalSetHeaderRecord,
     ComplexTrace,
@@ -168,7 +170,7 @@ def read_calset_document(path: Path, raw: bytes | None = None) -> ParsedCalFile:
         ports = tuple(item["id"] for item in document["ports"])
         impedances = tuple(complex(*item["z0_ohm"]) for item in document["ports"])
         if (
-            len(ports) != 2 or len(set(ports)) != 2
+            len(ports) not in (1, 2, 4) or len(set(ports)) != len(ports)
             or any(type(port) is not int or port < 1 for port in ports)
             or not all(cmath.isfinite(z0) for z0 in impedances)
         ):
@@ -211,85 +213,140 @@ def named_calset_groups(parsed: ParsedCalFile) -> list[tuple[str, list[ComplexTr
     return [(parsed.header.calset_name, traces)] if traces else []
 
 
-def fixture_calibration_ports(parsed: ParsedCalFile) -> list[tuple[int, complex]]:
-    if parsed.mapped_measurement_groups or not parsed.reconstructed_error_terms:
-        raise ValueError("夹具去嵌需要已解析具名误差项的常规两端口 CalSet。")
-    if parsed.error_term_set:
-        ports = parsed.error_term_set.port_ids
-        impedances = parsed.error_term_set.port_z0
-    elif parsed.header.magic == DERIVED_FORMAT:
-        ports = parsed.metadata["校准端口"]
-        impedances = parsed.metadata["参考阻抗 (Ω)"]
-    else:
-        raise ValueError("CalSet 缺少可用于去嵌的校准端口和参考阻抗。")
-    if len(ports) != 2:
-        raise ValueError("夹具去嵌当前支持常规两端口校准。")
-    return [(port, complex(*z0)) for port, z0 in zip(ports, impedances)]
+def fixture_calibration_ports(parsed: ParsedCalFile) -> list[tuple[int, complex | None]]:
+    if parsed.mapped_measurement_groups:
+        raise ValueError("夹具去嵌需要常规 S 参数校准。")
+
+    if parsed.reconstructed_error_terms:
+        if parsed.error_term_set:
+            ports = parsed.error_term_set.port_ids
+            impedances = parsed.error_term_set.port_z0
+        elif parsed.header.magic == DERIVED_FORMAT:
+            ports = parsed.metadata["校准端口"]
+            impedances = parsed.metadata["参考阻抗 (Ω)"]
+        else:
+            raise ValueError("CalSet 缺少校准端口和参考阻抗。")
+        if (
+            len(ports) not in (1, 2, 4)
+            or len(set(ports)) != len(ports)
+            or len(ports) != len(impedances)
+        ):
+            raise ValueError("夹具去嵌支持 1、2 或 4 个校准端口。")
+        return [(port, complex(*z0)) for port, z0 in zip(ports, impedances)]
+
+    if len(parsed.named_error_terms) == len(REFLECTION_TERM_NAMES):
+        names = {trace.key for trace in parsed.named_error_terms}
+        match = ERROR_TERM_PORTS.fullmatch(parsed.named_error_terms[0].key)
+        if match is not None:
+            port = int(match[1])
+            if names == {f"{name}({port},{port})" for name in REFLECTION_TERM_NAMES}:
+                return [(port, None)]
+    raise ValueError("需要具名单端口校准，或带端口及参考阻抗的两端口或四端口 CalSet。")
+
+
+def terminated_fixture(
+    sample: tuple[complex, complex, complex, complex],
+    match: complex,
+    port: int,
+    frequency_hz: float,
+) -> tuple[complex, complex]:
+    s11, s21, s12, s22 = sample
+    if not s21 or not s12:
+        raise ValueError(f"端口 {port} 在 {frequency_hz:.12g} Hz 的夹具传输为零。")
+    denominator = 1 - match * s11
+    if abs(denominator) <= 1e-12:
+        raise ValueError(f"端口 {port} 在 {frequency_hz:.12g} Hz 的夹具失配分母接近零。")
+    return denominator, s22 + s21 * match * s12 / denominator
 
 
 def deembed_calset(
-    parsed: ParsedCalFile, source_file: Path, fixtures: dict[int, Fixture],
+    parsed: ParsedCalFile,
+    source_file: Path,
+    fixtures: dict[int, Fixture],
+    *,
+    reference_impedance: float | None = None,
+    use_fixture_frequency_axis: bool = False,
 ) -> dict:
-    ports = fixture_calibration_ports(parsed)
-    if not fixtures or not fixtures.keys() <= {port for port, _ in ports}:
+    calibration_ports = fixture_calibration_ports(parsed)
+    if not fixtures or not fixtures.keys() <= {port for port, _ in calibration_ports}:
         raise ValueError("至少为一个已校准端口选择夹具文件。")
-    traces = {trace.key.casefold(): trace for trace in parsed.reconstructed_error_terms}
-    frequencies = parsed.reconstructed_error_terms[0].frequencies_hz
+    ports: dict[int, complex] = {}
+    for port, z0 in calibration_ports:
+        if z0 is None:
+            if (
+                reference_impedance is None or not math.isfinite(reference_impedance)
+                or reference_impedance <= 0
+            ):
+                raise ValueError("请输入单端口 CalSet 的参考阻抗。")
+            z0 = complex(reference_impedance)
+        ports[port] = z0
+
+    original = parsed.reconstructed_error_terms or parsed.named_error_terms
+    traces = {trace.key.casefold(): trace for trace in original}
+    frequencies = next(
+        (trace.frequencies_hz for trace in original if trace.frequencies_hz is not None), None,
+    )
+    frequency_source = "calset"
+    if frequencies is None and use_fixture_frequency_axis and len(ports) == 1:
+        frequencies = fixtures[next(iter(ports))].frequencies_hz
+        frequency_source = "fixture"
     if not frequencies or any(not math.isfinite(hz) or hz < 0 for hz in frequencies):
-        raise ValueError("CalSet 缺少有效频率轴。")
+        raise ValueError("CalSet 缺少有效频率轴。若为单端口，请先核对 CalSet 与夹具的频点及顺序。")
 
-    (p1, z1), (p2, z2) = ports
-    samples1 = fixture_samples(fixtures.get(p1), frequencies, z1)
-    samples2 = fixture_samples(fixtures.get(p2), frequencies, z2)
-    terms = {}
-    for source, receiver, source_samples, receiver_samples in (
-        (p1, p2, samples1, samples2), (p2, p1, samples2, samples1),
-    ):
-        keys = (
-            f"Directivity({source},{source})", f"SourceMatch({source},{source})",
-            f"ReflectionTracking({source},{source})", f"LoadMatch({receiver},{source})",
-            f"TransmissionTracking({receiver},{source})",
-        )
-        missing = [key for key in keys if key.casefold() not in traces]
-        if missing:
-            raise ValueError("CalSet 缺少误差项 " + ", ".join(missing))
-        source_traces = [traces[key.casefold()] for key in keys]
-        if any(trace.frequencies_hz != frequencies or len(trace.points) != len(frequencies) for trace in source_traces):
-            raise ValueError("两端口去嵌要求每条误差项具有同一频率轴。")
+    for trace in original:
+        if len(trace.points) != len(frequencies) or trace.frequencies_hz not in (None, frequencies):
+            raise ValueError(f"{trace.key} 的点数或频率轴与去嵌频率轴不一致。")
 
-        updated = [[] for _ in keys]
-        for index, (src, recv, *samples) in enumerate(zip(
-            source_samples, receiver_samples, *(trace.points for trace in source_traces)
-        )):
-            d, m, r, l, t = (complex(*value) for value in samples)
-            s11, s21, s12, s22 = src
-            r11, r21, r12, r22 = recv
-            if not all((s21, s12, r21, r12)):
-                raise ValueError(f"{source} → {receiver} 在 {frequencies[index]:.12g} Hz 的夹具传输为零。")
-            src_den = 1 - m * s11
-            recv_den = 1 - l * r11
-            if abs(src_den) <= 1e-12 or abs(recv_den) <= 1e-12:
-                raise ValueError(f"{source} → {receiver} 在 {frequencies[index]:.12g} Hz 的夹具失配分母接近零。")
-            values = (
-                d + r * s11 / src_den,
-                s22 + s21 * m * s12 / src_den,
-                r * (s12 / src_den) * (s21 / src_den),
-                r22 + r21 * l * r12 / recv_den,
-                t * (s21 / src_den) * (r12 / recv_den),
-            )
+    def input_points(key: str) -> list[tuple[float, float]]:
+        trace = traces.get(key.casefold())
+        if trace is None:
+            raise ValueError(f"CalSet 缺少误差项 {key}。")
+        return trace.points
+
+    terms: dict[str, list[tuple[float, float]]] = {}
+
+    def store_series(keys: tuple[str, ...], series: list[list[complex]]) -> None:
+        for key, values in zip(keys, series):
             if not all(cmath.isfinite(value) for value in values):
-                raise ValueError(f"{source} → {receiver} 在 {frequencies[index]:.12g} Hz 得到非有限误差项。")
-            for series, value in zip(updated, values):
-                series.append((value.real, value.imag))
-        terms.update(zip(keys, updated))
+                raise ValueError(f"{key} 去嵌后含非有限值。")
+            terms[key] = [(value.real, value.imag) for value in values]
 
-        # Isolation is additive at the raw receiver. A fixture does not change
-        # it in this model. Keysight matrix imports may lack this named trace.
-        isolation = traces.get(f"crosstalk({receiver},{source})")
-        if isolation is not None:
-            if isolation.frequencies_hz != frequencies or len(isolation.points) != len(frequencies):
-                raise ValueError(f"{isolation.key} 的频率轴与 CalSet 不一致。")
-            terms[isolation.key] = isolation.points
+    fixture_rows = {
+        port: fixture_samples(fixtures.get(port), frequencies, z0) for port, z0 in ports.items()
+    }
+    for source, source_rows in fixture_rows.items():
+        reflection_keys = tuple(f"{name}({source},{source})" for name in REFLECTION_TERM_NAMES)
+        directivity, tracking, source_match = (input_points(key) for key in reflection_keys)
+        reflection = [[], [], []]
+        outgoing_gains = []
+        for hz, sample, d, r, m in zip(frequencies, source_rows, directivity, tracking, source_match):
+            s11, s21, s12, _ = sample
+            denominator, new_match = terminated_fixture(sample, complex(*m), source, hz)
+            outgoing = s21 / denominator
+            reflection[0].append(complex(*d) + complex(*r) * s11 / denominator)
+            reflection[1].append(complex(*r) * (s12 / denominator) * outgoing)
+            reflection[2].append(new_match)
+            outgoing_gains.append(outgoing)
+        store_series(reflection_keys, reflection)
+
+        for receiver, receiver_rows in fixture_rows.items():
+            if receiver == source:
+                continue
+            path_keys = (f"LoadMatch({receiver},{source})", f"TransmissionTracking({receiver},{source})")
+            load_match, transmission = (input_points(key) for key in path_keys)
+            path_terms = [[], []]
+            for hz, sample, l, t, outgoing in zip(
+                frequencies, receiver_rows, load_match, transmission, outgoing_gains
+            ):
+                denominator, new_match = terminated_fixture(sample, complex(*l), receiver, hz)
+                path_terms[0].append(new_match)
+                path_terms[1].append(complex(*t) * outgoing * (sample[2] / denominator))
+            store_series(path_keys, path_terms)
+
+            # Isolation is additive at the raw receiver in this model.
+            isolation = traces.get(f"crosstalk({receiver},{source})")
+            if isolation is not None:
+                terms[isolation.key] = isolation.points
 
     return {
         "format": DERIVED_FORMAT,
@@ -297,13 +354,14 @@ def deembed_calset(
         "name": f"{parsed.header.calset_name}_deembed",
         "guid": str(uuid4()),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "ports": [{"id": port, "z0_ohm": [z0.real, z0.imag]} for port, z0 in ports],
+        "ports": [{"id": port, "z0_ohm": [z0.real, z0.imag]} for port, z0 in ports.items()],
         "frequencies_hz": frequencies,
         "terms": dict(sorted(terms.items())),
         "provenance": {
             "source_file": source_file.name,
             "source_calset": parsed.header.calset_name,
             "source_guid": parsed.header.calset_guid,
+            "frequency_axis": frequency_source,
             "fixtures": [
                 {"port": port, "file": fixture.path.name, "reversed_ports": fixture.reversed_ports}
                 for port, fixture in fixtures.items()
